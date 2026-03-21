@@ -1,0 +1,4 @@
+# Personal setup and formatting files
+.vscode/
+AGENTS.md
+pyproject.toml
