@@ -2,3 +2,9 @@
 .vscode/
 AGENTS.md
 pyproject.toml
+
+# Caches
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
