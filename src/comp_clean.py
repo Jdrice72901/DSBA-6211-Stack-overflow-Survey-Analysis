@@ -554,6 +554,124 @@ PLATFORM_2015 = [
 
 TECH_2015_ALL = LANG_2015 + DB_2015 + PLATFORM_2015
 
+# 2016 put all tech into a single column, these separate them into their respective ones
+DB_2016 = DB_2015.copy()
+LANG_2016 = LANG_2015.copy()
+
+PLAT_2016 = [
+    'Android',
+    'Arduino / Raspberry Pi',
+    'Cloud (AWS, GAE, Azure, etc.)',
+    'Cordova',
+    'Hadoop',
+    'iOS',
+    'LAMP',
+    'Node.js',
+    'Salesforce',
+    'SharePoint',
+    'Spark',
+    'Windows Phone',
+    'WordPress'
+]
+
+# These are techs that aren't really a language, platform, or database and are thus dropped
+EXTRAS = [
+    'AngularJS',
+    'APT',
+    'Ansible',
+    'Bun',
+    'Cargo',
+    'Chocolatey',
+    'Composer',
+    'Datadog',
+    'Zephyr',
+    'Flow',
+    'Google Cloud Storage',
+    'Gradle',
+    'Homebrew',
+    'MSBuild',
+    'Make',
+    'Maven (build tool)',
+    'Microsoft Azure (Tables, CosmosDB, SQL, etc)',
+    'New Relic',
+    'Ninja',
+    'NuGet',
+    'Other(s):',
+    'Pacman',
+    'Pip',
+    'Poetry',
+    'Prometheus',
+    'ReactJS',
+    'Slack',
+    'Slack Apps and Integrations',
+    'Splunk',
+    'Terraform',
+    'Vite',
+    'Webpack',
+    'Yarn',
+    'npm',
+    'pnpm'
+]
+
+# Used to correctly determine what to keep and remove for 2016 tech columns
+DB_REMOVE = set(LANG_2016 + PLAT_2016 + EXTRAS)
+LANG_REMOVE = set(DB_2016 + PLAT_2016 + EXTRAS)
+PLAT_REMOVE = set(DB_2016 + LANG_2016 + EXTRAS)
+
+# Standardizes language responses across the years
+LANG_MAP = {
+    'C++11': 'C++',
+    'Matlab': 'MATLAB',
+    'Cobol': 'COBOL',
+    'Ocaml': 'OCaml',
+    'Delphi': 'Delphi/Object Pascal',
+    'LISP': 'Lisp',
+    'Common Lisp': 'Lisp',
+    'Bash/Shell': 'Bash/Shell/PowerShell',
+    'Bash/Shell (all shells)': 'Bash/Shell/PowerShell',
+    'PowerShell': 'Bash/Shell/PowerShell',
+    'HTML': 'HTML/CSS',
+    'CSS': 'HTML/CSS',
+    'Visual Basic (.Net)': 'VB.NET',
+    'Visual Basic 6': 'Visual Basic'
+}
+
+# Standardizes platform responses across the years
+PLAT_MAP = {
+    'Amazon Web Services (AWS)': 'AWS',
+    'Arduino': 'Arduino / Raspberry Pi',
+    'Raspberry Pi': 'Arduino / Raspberry Pi',
+    'Azure': 'Microsoft Azure',
+    'Cloud': 'Generic Cloud',
+    'Cloud (AWS, GAE, Azure, etc.)': 'Generic Cloud',
+    'Google Cloud Platform/App Engine': 'Google Cloud',
+    'Google Cloud Platform': 'Google Cloud',
+    'IBM Cloud or Watson': 'IBM Cloud',
+    'IBM Cloud Or Watson': 'IBM Cloud',
+    'Digital Ocean': 'DigitalOcean',
+    'Oracle Cloud Infrastructure (OCI)': 'Oracle Cloud Infrastructure',
+    'Linode, now Akamai': 'Linode',
+    'Mac OS': 'macOS',
+    'MacOS': 'macOS',
+    'Linux Desktop': 'Linux',
+    'Windows Desktop': 'Windows',
+    'Windows Desktop or Server': 'Windows',
+    'Sharepoint': 'SharePoint',
+    'Wordpress': 'WordPress'
+}
+
+# Standardizes database responses across the years
+DB_MAP = {
+    'SQL Server': 'Microsoft SQL Server',
+    'Amazon DynamoDB': 'DynamoDB',
+    'Dynamodb': 'DynamoDB',
+    'IBM Db2': 'IBM DB2',
+    'Google BigQuery': 'BigQuery',
+    'Couch DB': 'CouchDB',
+    'Neo4J': 'Neo4j',
+    'Firebase': 'Firebase Realtime Database'
+}
+
 # Country responses that cannot be mapped to a region or cleaned country name
 COUNTRY_SPECIAL = {
     'Nomadic',
@@ -667,6 +785,50 @@ def build_2015_fields(df):
         'current_tech': current_tech
     })
 
+# Used to correctly attribute mixed multiselect columns to the correct single column
+def clean_multiselect(value, keep=None, remove=None, replace=None):
+    if pd.isna(value):
+        return pd.NA
+
+    values = []
+    seen = set()
+    keep = set(keep) if keep is not None else None
+    replace = replace or {}
+    remove = remove or set()
+
+    for item in str(value).split(';'):
+        token = item.strip()
+        if token in {'', 'nan'}:
+            continue
+        if keep is not None and token not in keep:
+            continue
+        if token in remove:
+            continue
+        token = replace.get(token, token)
+        if token in remove or token in seen:
+            continue
+        values.append(token)
+        seen.add(token)
+
+    return ';'.join(values) if values else pd.NA
+
+
+# 2016 has its tech fields grouped together, this properly separates them
+def build_2016_fields(df):
+    tech = df['tech_do']
+    return pd.DataFrame({
+        'language': tech.map(
+            lambda value: clean_multiselect(value, keep=LANG_2016, remove=LANG_REMOVE, replace=LANG_MAP)
+        ),
+        'database': tech.map(
+            lambda value: clean_multiselect(value, keep=DB_2016, remove=DB_REMOVE, replace=DB_MAP)
+        ),
+        'platform': tech.map(
+            lambda value: clean_multiselect(value, keep=PLAT_2016, remove=PLAT_REMOVE, replace=PLAT_MAP)
+        ),
+        'current_tech': tech.map(clean_multiselect)
+    })
+
 
 # Helper to quickly pull in the desired columns for a given year
 def read_year(year, columns):
@@ -710,6 +872,10 @@ def load_year(year):
 
     if year == 2015:
         derived = build_2015_fields(df)
+        for col in derived.columns:
+            out[col] = derived[col]
+    if year == 2016:
+        derived = build_2016_fields(df)
         for col in derived.columns:
             out[col] = derived[col]
 
@@ -989,6 +1155,21 @@ def build_clean_core():
     clean['education_clean'] = clean['education'].map(clean_education)
     clean['org_size_clean'] = clean['org_size'].map(clean_org_size)
     clean['remote_group'] = clean['remote'].map(group_remote)
+
+    # Clean multiselect text so counts are based on real values rather than raw survey quirks
+    clean['language'] = clean['language'].map(
+        lambda value: clean_multiselect(value, remove=LANG_REMOVE, replace=LANG_MAP)
+    )
+    clean['database'] = clean['database'].map(
+        lambda value: clean_multiselect(value, remove=DB_REMOVE, replace=DB_MAP)
+    )
+    clean['platform'] = clean['platform'].map(
+        lambda value: clean_multiselect(value, remove=PLAT_REMOVE, replace=PLAT_MAP)
+    )
+    clean['webframe'] = clean['webframe'].map(clean_multiselect)
+    clean['misc_tech'] = clean['misc_tech'].map(clean_multiselect)
+    clean['op_sys_prof'] = clean['op_sys_prof'].map(clean_multiselect)
+    clean['current_tech'] = clean['current_tech'].map(clean_multiselect)
 
     # Defines the ranges that we considered to be valid data to keep
     clean['age_mid'] = clean['age_num'].where(clean['age_num'].between(10, 90))
