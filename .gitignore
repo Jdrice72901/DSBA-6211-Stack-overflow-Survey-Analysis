@@ -1,10 +1,23 @@
 # Personal setup and formatting files
+.venv/
+venv/
 .vscode/
+docs/
 AGENTS.md
 pyproject.toml
+docs/proj_ref.txt
 
-# Caches
+# Caches and build artifacts
 __pycache__/
+*.py[cod]
+*.pyd
+*.so
 .pytest_cache/
+pytest-cache-files-*/
 .ruff_cache/
+.mypy_cache/
 .ipynb_checkpoints/
+build/
+dist/
+*.egg-info/
+.codex/

@@ -492,6 +492,70 @@ CPI_U = {
     2025: 321.943
 }
 
+INVENTORY_ONLY_INFO = {
+    2011: {
+        'file': '2011 Stack Overflow Survey Results.csv',
+        'header': 0
+    },
+    2012: {
+        'file': '2012 Stack Overflow Survey Results.csv',
+        'header': 0
+    },
+    2013: {
+        'file': '2013 Stack Overflow Survey Responses.csv',
+        'header': 0
+    },
+    2014: {
+        'file': '2014 Stack Overflow Survey Responses.csv',
+        'header': 0
+    }
+}
+
+NUMERIC_RULES = [
+    {
+        'field': 'age',
+        'clean_field': 'age_mid',
+        'min': 10,
+        'max': 90
+    },
+    {
+        'field': 'age_first_code',
+        'clean_field': 'age_first_code_clean',
+        'min': 5,
+        'max': 70
+    },
+    {
+        'field': 'years_code',
+        'clean_field': 'years_code_clean',
+        'min': 0,
+        'max': 50
+    },
+    {
+        'field': 'years_code_pro',
+        'clean_field': None,
+        'min': 0,
+        'max': 50
+    },
+    {
+        'field': 'work_exp',
+        'clean_field': None,
+        'min': 0,
+        'max': 50
+    },
+    {
+        'field': 'work_week_hrs',
+        'clean_field': 'work_week_hrs_clean',
+        'min': 1,
+        'max': 100
+    },
+    {
+        'field': 'comp',
+        'clean_field': 'comp_usd_clean',
+        'min': 1_000,
+        'max': 1_000_000
+    }
+]
+
 # Mapping of the multiresponse fields separated into individual columns in 2015
 EDU_2015_LEVELS = [
     ('No formal education / other', 'Training & Education: No formal training'),
@@ -1085,6 +1149,218 @@ def role_family(token):
     if 'qa' in text or 'quality assurance' in text or 'test' in text:
         return 'QA / Testing'
     return 'Other'
+
+
+# =====================================================================================
+# Audit and validation helpers
+# =====================================================================================
+
+def load_clean_core(path=OUT_PATH):
+    return pd.read_parquet(path)
+
+
+def survey_file_inventory():
+    rows = []
+    all_info = {
+        **INVENTORY_ONLY_INFO,
+        **{
+            year: {
+                'file': info['file'],
+                'header': info['header']
+            }
+            for year, info in YEAR_INFO.items()
+        }
+    }
+
+    for year, info in sorted(all_info.items()):
+        path = DATA_DIR / info['file']
+        if not path.exists():
+            rows.append({
+                'survey_year': year,
+                'file': info['file'],
+                'status': 'missing',
+                'analysis_status': 'inventory_only' if year in INVENTORY_ONLY_INFO else 'clean_core',
+                'row_count': np.nan,
+                'column_count': np.nan
+            })
+            continue
+
+        columns = pd.read_csv(
+            path,
+            header=info['header'],
+            nrows=0,
+            encoding_errors='ignore'
+        ).columns
+        rows.append({
+            'survey_year': year,
+            'file': info['file'],
+            'status': 'present',
+            'analysis_status': 'inventory_only' if year in INVENTORY_ONLY_INFO else 'clean_core',
+            'row_count': sum(1 for _ in path.open(encoding='utf-8', errors='ignore')) - info['header'] - 1,
+            'column_count': len(columns)
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _parsed_numeric(clean_core, field):
+    if field == 'work_week_hrs':
+        return pd.to_numeric(clean_core[field], errors='coerce')
+    return clean_core[field].map(parse_midpoint)
+
+
+def audit_numeric_masks(clean_core):
+    rows = []
+
+    for rule in NUMERIC_RULES:
+        field = rule['field']
+        parsed = _parsed_numeric(clean_core, field)
+        in_range = parsed.between(rule['min'], rule['max'])
+        clean_field = rule['clean_field']
+        clean_non_null = clean_core[clean_field].notna().sum() if clean_field in clean_core.columns else np.nan
+
+        rows.append({
+            'field': field,
+            'clean_field': clean_field or 'not_retained_directly',
+            'min_valid': rule['min'],
+            'max_valid': rule['max'],
+            'source_non_null': int(parsed.notna().sum()),
+            'range_masked': int((parsed.notna() & ~in_range).sum()),
+            'clean_non_null': clean_non_null
+        })
+
+    return pd.DataFrame(rows)
+
+
+def audit_country_region(clean_core):
+    return (
+        clean_core
+        .groupby('survey_year')
+        .agg(
+            rows=('row_id', 'size'),
+            country_non_null=('country', lambda series: int(series.notna().sum())),
+            country_clean_missing=('country_clean', lambda series: int(series.isna().sum())),
+            region_missing=('region', lambda series: int(series.isna().sum()))
+        )
+        .reset_index()
+    )
+
+
+def audit_unmapped_countries(clean_core, sample_col=None):
+    frame = clean_core.copy()
+    if sample_col is not None:
+        frame = frame.loc[frame[sample_col]].copy()
+
+    unmapped = frame.loc[
+        frame['country'].notna() & frame['country_clean'].isna(),
+        ['survey_year', 'country']
+    ].copy()
+    unmapped['country_input'] = unmapped['country'].replace(COUNTRY_ALIAS)
+    unmapped['is_special_case'] = unmapped['country'].isin(COUNTRY_SPECIAL)
+
+    return (
+        unmapped
+        .groupby(['survey_year', 'country', 'country_input', 'is_special_case'])
+        .size()
+        .rename('rows')
+        .reset_index()
+        .sort_values(['survey_year', 'rows', 'country'], ascending=[True, False, True])
+    )
+
+
+def audit_comp_outliers(clean_core):
+    parsed = clean_core['comp'].map(parse_midpoint)
+    frame = clean_core.assign(comp_parsed=parsed)
+    return (
+        frame
+        .groupby('survey_year')
+        .agg(
+            comp_raw_non_null=('comp_parsed', lambda series: int(series.notna().sum())),
+            comp_below_floor=('comp_parsed', lambda series: int(series.lt(1_000).sum())),
+            comp_above_cap=('comp_parsed', lambda series: int(series.gt(1_000_000).sum())),
+            comp_exact_cap=('comp_parsed', lambda series: int(series.eq(1_000_000).sum())),
+            comp_clean_non_null=('comp_usd_clean', lambda series: int(series.notna().sum())),
+            comp_model_rows=('is_comp_model_sample', lambda series: int(series.sum()))
+        )
+        .reset_index()
+    )
+
+
+def audit_clean_core(clean_core=None):
+    clean_core = load_clean_core() if clean_core is None else clean_core
+    return {
+        'year_counts': clean_core.groupby('survey_year').size().rename('rows').reset_index(),
+        'country_region': audit_country_region(clean_core),
+        'unmapped_countries': audit_unmapped_countries(clean_core),
+        'numeric_masks': audit_numeric_masks(clean_core),
+        'comp_outliers': audit_comp_outliers(clean_core)
+    }
+
+
+def validate_clean_core(clean_core=None):
+    clean_core = load_clean_core() if clean_core is None else clean_core
+    errors = []
+
+    required = {
+        'row_id',
+        'survey_year',
+        'country',
+        'country_clean',
+        'region',
+        'comp_usd_clean',
+        'log_comp_real_2025',
+        'comp_real_2025',
+        'is_comp_analysis_sample',
+        'is_comp_model_core',
+        'is_comp_model_tech_rich',
+        'is_comp_model_ai_era',
+        'is_comp_model_sample'
+    }
+    missing = sorted(required - set(clean_core.columns))
+    if missing:
+        errors.append(f"Missing required derived columns: {', '.join(missing)}")
+
+    if clean_core['survey_year'].nunique() != len(YEARS):
+        errors.append(f"Expected {len(YEARS)} survey years but found {clean_core['survey_year'].nunique()}")
+    if set(clean_core['survey_year'].dropna().unique()) != set(YEARS):
+        errors.append('Derived survey years do not match YEAR_INFO keys')
+    if not clean_core['row_id'].is_unique:
+        errors.append('row_id must be unique')
+
+    response_ids = clean_core.loc[clean_core['response_id'].notna(), ['survey_year', 'response_id']]
+    if response_ids.duplicated().any():
+        errors.append('response_id must be unique within survey_year when present')
+
+    region_values = set(clean_core['region'].dropna().unique())
+    if not region_values.issubset(REGION_ALLOWED):
+        extra = ', '.join(sorted(region_values - REGION_ALLOWED))
+        errors.append(f"Unexpected region values: {extra}")
+
+    if not clean_core['comp_usd_clean'].dropna().between(1_000, 1_000_000).all():
+        errors.append('comp_usd_clean must be between 1,000 and 1,000,000 when present')
+
+    log_rows = clean_core['log_comp_real_2025'].notna()
+    if log_rows.any():
+        expected_log = np.log(clean_core.loc[log_rows, 'comp_real_2025'])
+        if not np.allclose(clean_core.loc[log_rows, 'log_comp_real_2025'], expected_log):
+            errors.append('log_comp_real_2025 must equal log(comp_real_2025)')
+
+    if not clean_core.loc[clean_core['country_clean'].isna(), 'region'].isna().all():
+        errors.append('region should be missing when country_clean is missing')
+
+    if not (clean_core['is_comp_model_core'] == (clean_core['is_comp_analysis_sample'] & clean_core['survey_year'].ge(2019))).all():
+        errors.append('is_comp_model_core must match 2019+ compensation analysis sample')
+    if not (clean_core['is_comp_model_tech_rich'] == (clean_core['is_comp_analysis_sample'] & clean_core['survey_year'].ge(2021))).all():
+        errors.append('is_comp_model_tech_rich must match 2021+ compensation analysis sample')
+    if not (clean_core['is_comp_model_ai_era'] == (clean_core['is_comp_analysis_sample'] & clean_core['survey_year'].ge(2023))).all():
+        errors.append('is_comp_model_ai_era must match 2023+ compensation analysis sample')
+    if not (clean_core['is_comp_model_sample'] == clean_core['is_comp_model_core']).all():
+        errors.append('is_comp_model_sample must currently alias is_comp_model_core')
+
+    if errors:
+        raise ValueError('\n'.join(errors))
+
+    return True
 
 
 # =====================================================================================
