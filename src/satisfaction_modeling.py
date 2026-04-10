@@ -1,4 +1,5 @@
 import warnings
+from pathlib import Path
 
 import lightgbm as lgb
 import numpy as np
@@ -18,22 +19,39 @@ from statsmodels.miscmodels.ordinal_model import OrderedModel
 
 from src import model_audit
 
+# -------------------------------------------------------------------------------------
+# Setup
+# -------------------------------------------------------------------------------------
+
 warnings.filterwarnings('ignore', category=FutureWarning)
 
+# Shared path to the canonical cleaned respondent-year table
+ROOT = Path(__file__).resolve().parents[1]
+CLEAN_PATH = ROOT / 'data' / 'derived' / 'clean_core.parquet'
+
+# Core random seed and canonical target column names for the satisfaction task
 RANDOM_STATE = 42
 SAT_TARGET_COL = 'job_sat_std'
 SAT_BINARY_COL = 'sat_binary'
 SAT_INSTRUMENT_COL = 'job_sat_instrument'
+
+# Canonical year window and held-out split used for future-wave validation
 SAT_CANONICAL_YEARS = [2015, 2016, 2017, 2018, 2019, 2020, 2024, 2025]
 SAT_TRAIN_YEARS = [2015, 2016, 2017, 2018, 2019, 2020]
 SAT_VALID_YEAR = 2024
 SAT_TEST_YEAR = 2025
+
+# Shared 5-class ordinal label setup plus the optional positive/binary cut
 SAT_LABELS = [1, 2, 3, 4, 5]
 SAT_BINARY_THRESHOLD = 4
+
+# Numeric 0-10 harmonization schemes for the later-wave satisfaction instruments
 SAT_NUMERIC_SCHEMES = {
     'default': [1, 4, 6, 8],
     'alt_equal_width': [2, 4, 6, 8]
 }
+
+# Survey instrument family used by each year that enters the canonical task
 SAT_INSTRUMENTS = {
     2015: 'text_5pt',
     2016: 'text_5pt',
@@ -44,6 +62,8 @@ SAT_INSTRUMENTS = {
     2024: 'numeric_11pt',
     2025: 'numeric_11pt'
 }
+
+# Text label harmonization map that collapses the raw scales into one shared target
 SAT_MAP = {
     "I hate my job": 1,
     "I'm somewhat dissatisfied with my job": 2,
@@ -63,6 +83,8 @@ SAT_MAP = {
     'Very dissatisfied': 1,
     'Very satisfied': 5
 }
+
+# Default LightGBM and CatBoost settings for the main satisfaction comparison
 DEFAULT_LGB_PARAMS = {
     'objective': 'multiclass',
     'metric': 'multi_logloss',
@@ -93,7 +115,11 @@ DEFAULT_CATBOOST_PARAMS = {
     'allow_writing_files': False,
     'verbose': False
 }
+
+# OrderedModel gets sampled because the full dummy matrix gets unruly in a hurry
 ORDERED_MAX_ROWS = 50_000
+
+# Numeric fields that should always be coerced before modeling or diagnostics
 SAT_NUMERIC_FIELDS = [
     'age_mid',
     'years_code_clean',
@@ -109,6 +135,8 @@ SAT_NUMERIC_FIELDS = [
     'role_family_count',
     'log_comp_real_2025'
 ]
+
+# Group hierarchy used for the simple categorical mode baseline
 SAT_BASELINE_GROUP_SETS = [
     ['country_clean'],
     ['region'],
@@ -119,10 +147,13 @@ SAT_BASELINE_GROUP_SETS = [
 # -------------------------------------------------------------------------------------
 # Target build
 # -------------------------------------------------------------------------------------
+
+# Maps each survey year to the type of job-satisfaction question it used
 def sat_instrument(survey_year):
     return SAT_INSTRUMENTS.get(survey_year, pd.NA)
 
 
+# Converts numeric 0-10 answers into the shared 1-5 ordinal scale
 def numeric_job_sat_to_ordinal(value, scheme='default'):
     if pd.isna(value):
         return np.nan
@@ -144,6 +175,7 @@ def numeric_job_sat_to_ordinal(value, scheme='default'):
     return 5
 
 
+# Standardizes raw text and numeric answers into one comparable target field
 def standardize_job_sat_value(value, survey_year, numeric_scheme='default'):
     if pd.isna(value):
         return np.nan
@@ -155,6 +187,7 @@ def standardize_job_sat_value(value, survey_year, numeric_scheme='default'):
     return SAT_MAP.get(value, np.nan)
 
 
+# Adds the harmonized satisfaction target while keeping the original survey field untouched
 def add_job_sat_std(frame, numeric_scheme='default'):
     out = frame.copy()
     out[SAT_INSTRUMENT_COL] = out['survey_year'].map(sat_instrument)
@@ -165,6 +198,7 @@ def add_job_sat_std(frame, numeric_scheme='default'):
     return out
 
 
+# Builds the age and career-stage proxies that survived the final feature audit
 def add_career_stage_features(frame):
     out = frame.copy()
     age_mid = pd.to_numeric(out.get('age_mid', pd.Series(pd.NA, index=out.index)), errors='coerce')
@@ -184,6 +218,7 @@ def add_career_stage_features(frame):
     return out
 
 
+# Main builder for the employed-professional respondent-year modeling frame
 def build_satisfaction_frame(
     clean_core,
     include_years=None,
@@ -216,6 +251,7 @@ def build_satisfaction_frame(
     return frame
 
 
+# Quick year summary for target coverage and population checks
 def job_sat_year_summary(
     clean_core,
     include_years=None,
@@ -364,6 +400,8 @@ def split_satisfaction_years(
 # -------------------------------------------------------------------------------------
 # Prep and scoring
 # -------------------------------------------------------------------------------------
+
+# Coerces the fields the tree models expect so every fit starts from the same dtypes
 def coerce_satisfaction_frame(frame):
     out = frame.copy()
 
@@ -381,6 +419,7 @@ def coerce_satisfaction_frame(frame):
     return out
 
 
+# Saves numeric prep in a way that survives folds where a whole column is missing
 def fit_numeric_prep(frame, num_cols):
     observed_cols = [col for col in num_cols if frame[col].notna().any()]
     all_missing_cols = [col for col in num_cols if col not in observed_cols]
@@ -406,6 +445,7 @@ def fit_numeric_prep(frame, num_cols):
     }
 
 
+# Applies the saved numeric prep without losing the all-missing columns
 def transform_numeric_prep(frame, num_cols, num_prep):
     observed_cols = num_prep['observed_cols']
     all_missing_cols = num_prep['all_missing_cols']
@@ -426,6 +466,7 @@ def transform_numeric_prep(frame, num_cols, num_prep):
     return num_df.reindex(columns=num_cols)
 
 
+# LightGBM prep path with native categoricals and median-imputed numerics
 def prepare_lgbm_frame(frame, cat_cols, num_cols, target_col=SAT_TARGET_COL):
     out = coerce_satisfaction_frame(frame)
 
@@ -439,6 +480,7 @@ def prepare_lgbm_frame(frame, cat_cols, num_cols, target_col=SAT_TARGET_COL):
     return out, num_prep
 
 
+# Applies the train-fit LightGBM prep to valid or test rows
 def transform_lgbm_frame(frame, cat_cols, num_cols, num_prep, target_col=SAT_TARGET_COL):
     out = coerce_satisfaction_frame(frame)
 
@@ -452,6 +494,7 @@ def transform_lgbm_frame(frame, cat_cols, num_cols, num_prep, target_col=SAT_TAR
     return out
 
 
+# CatBoost gets the same numeric treatment but keeps categoricals as strings
 def prepare_catboost_frame(frame, cat_cols, num_cols, target_col=SAT_TARGET_COL, num_prep=None):
     out = coerce_satisfaction_frame(frame)
 
@@ -901,6 +944,8 @@ def fit_catboost_multiclass(
 # -------------------------------------------------------------------------------------
 # Comparison and sensitivities
 # -------------------------------------------------------------------------------------
+
+# Flattens the model outputs into the table format used in notebooks and reports
 def result_row(setup, result):
     if result is None:
         return {
@@ -928,6 +973,7 @@ def result_row(setup, result):
     }
 
 
+# Runs the canonical satisfaction comparison table plus the with-comp sensitivity branch
 def compare_satisfaction_setups(
     clean_core,
     numeric_scheme='default',
@@ -1055,6 +1101,7 @@ def compare_satisfaction_setups(
     }
 
 
+# Rolling-origin helper so we can sanity check whether the chosen family stays stable over time
 def rolling_origin_satisfaction(
     clean_core,
     spec='core_no_comp',
@@ -1097,6 +1144,7 @@ def rolling_origin_satisfaction(
     return pd.DataFrame(rows)
 
 
+# Checks whether alternate target harmonization choices materially change the modeling story
 def harmonization_sensitivity(
     clean_core,
     spec='core_no_comp',
@@ -1166,3 +1214,22 @@ def harmonization_sensitivity(
         })
 
     return pd.DataFrame(rows).sort_values(['valid_qwk', 'test_qwk'], ascending=False)
+
+
+# -------------------------------------------------------------------------------------
+# Main
+# -------------------------------------------------------------------------------------
+
+# Runs the canonical satisfaction comparison directly from the cleaned parquet
+def main():
+    from src import comp_clean
+
+    clean_core = comp_clean.load_clean_core(CLEAN_PATH)
+    results = compare_satisfaction_setups(clean_core)
+
+    print(results['summary'].to_string(index=False))
+    print(f"Selected main setup: {results['selected_main_setup']}")
+
+
+if __name__ == '__main__':
+    main()

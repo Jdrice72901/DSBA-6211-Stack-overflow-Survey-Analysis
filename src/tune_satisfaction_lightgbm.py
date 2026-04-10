@@ -11,18 +11,31 @@ import pandas as pd
 import src.satisfaction_modeling as sat
 from src import model_audit
 
+# -------------------------------------------------------------------------------------
+# Setup
+# -------------------------------------------------------------------------------------
+
+# Canonical clean input plus the output root for tuning artifacts
 ROOT = Path(__file__).resolve().parents[1]
 INPUT_PATH = ROOT / 'data' / 'derived' / 'clean_core.parquet'
 OUTPUT_ROOT = ROOT / 'data' / 'outputs'
+
+# Default study names and run lengths for the standalone Optuna workflow
 DEF_STUDY = 'sat_lightgbm_optuna'
 DEF_TRIALS = 80
 DEF_TIMEOUT = None
+
+# Seed presets for the tuning objective, final rescoring, and optional rolling-origin branch
 DEF_SEED_TEXT = '42,52,62'
 DEF_FINAL_SEED_TEXT = '42,52,62,72,82'
 DEF_ROLLING_SEED_TEXT = '42'
+
+# Default objective and search-space controls for the LightGBM study
 DEF_OBJECTIVE_METRIC = 'qwk'
 DEF_SEARCH_SPACE = 'broad'
 DEF_EARLY_STOPPING = 75
+
+# Extra anchor values for knobs that are not explicitly set in the canonical default params
 ANCHOR_OVERRIDES = {
     'min_child_weight': 1e-3,
     'subsample_freq': 0,
@@ -37,10 +50,13 @@ ANCHOR_OVERRIDES = {
 # -------------------------------------------------------------------------------------
 # Small helpers
 # -------------------------------------------------------------------------------------
+
+# Keeps long cloud runs chatty enough that you know they are still alive
 def log_line(message=''):
     print(message, flush=True)
 
 
+# Parses comma-separated seed strings into a clean list of ints
 def parse_seed_text(seed_text, default_text):
     text = default_text if seed_text is None else str(seed_text).strip()
     if not text:
@@ -52,6 +68,7 @@ def parse_seed_text(seed_text, default_text):
     return seeds
 
 
+# Reads the canonical cleaned table without caring whether it is parquet or csv
 def read_frame(path):
     suffix = path.suffix.lower()
     if suffix == '.parquet':
@@ -61,6 +78,7 @@ def read_frame(path):
     raise ValueError(f'Unsupported input format: {path}')
 
 
+# Summarizes repeated-seed runs so Optuna compares stable aggregates, not one lucky seed
 def summarize_runs(run_df, prefix):
     return {
         f'{prefix}_qwk_mean': float(run_df['qwk'].mean()),
@@ -77,6 +95,7 @@ def summarize_runs(run_df, prefix):
     }
 
 
+# Lets the study optimize QWK, macro F1, or a simple blend without changing the trial code
 def objective_from_summary(summary, prefix, metric_name):
     if metric_name == 'macro_f1':
         return float(summary[f'{prefix}_macro_f1_mean'])
@@ -87,6 +106,7 @@ def objective_from_summary(summary, prefix, metric_name):
     return float(summary[f'{prefix}_qwk_mean'])
 
 
+# Centralizes the file paths written by the tuning run
 def build_output_paths(study_name, output_root):
     study_dir = output_root / study_name
     study_dir.mkdir(parents=True, exist_ok=True)
@@ -101,6 +121,7 @@ def build_output_paths(study_name, output_root):
     }
 
 
+# Keeps persistence opt-in so sqlite is only created when resumability is worth the overhead
 def resolve_storage(args, output_paths):
     if args.storage_path is not None:
         storage_path = Path(args.storage_path)
@@ -131,6 +152,8 @@ def resolve_storage(args, output_paths):
 # -------------------------------------------------------------------------------------
 # Data prep
 # -------------------------------------------------------------------------------------
+
+# Builds the exact canonical satisfaction frame and split bundle used by the main pipeline
 def build_run_bundle(args):
     clean_core = read_frame(Path(args.input_path))
     bundle = sat.build_satisfaction_bundle(
@@ -186,6 +209,7 @@ def build_run_bundle(args):
     }
 
 
+# Preps one train-valid bundle so repeated seed fits don't redo the same frame work
 def build_dataset_bundle(train_df, valid_df, cat_cols, num_cols):
     train_prepped, num_prep = sat.prepare_lgbm_frame(train_df, cat_cols, num_cols)
     valid_prepped = sat.transform_lgbm_frame(valid_df, cat_cols, num_cols, num_prep)
@@ -199,6 +223,8 @@ def build_dataset_bundle(train_df, valid_df, cat_cols, num_cols):
 # -------------------------------------------------------------------------------------
 # Search setup
 # -------------------------------------------------------------------------------------
+
+# These are the LightGBM knobs we actually want Optuna to explore
 def tune_param_keys():
     return [
         'n_estimators',
@@ -220,12 +246,14 @@ def tune_param_keys():
     ]
 
 
+# Uses the current canonical LightGBM setup as the first anchor trial
 def default_anchor_params():
     anchor = sat.resolve_lgb_params()
     anchor.update(ANCHOR_OVERRIDES)
     return {key: anchor[key] for key in tune_param_keys()}
 
 
+# Collects any optional GPU arguments into one clean params dict
 def resolve_device_params(args):
     params = {}
     if args.use_gpu:
@@ -238,6 +266,7 @@ def resolve_device_params(args):
     return params
 
 
+# Broad and focused search spaces so local smoke runs and cloud studies can share one script
 def suggest_lgbm_params(trial, args):
     if args.search_space == 'focused':
         params = {
@@ -284,6 +313,7 @@ def suggest_lgbm_params(trial, args):
     return resolved
 
 
+# Fans a base param set out across explicit seeds for more stable comparisons
 def seed_params(params, seed):
     resolved = dict(params)
     resolved['random_state'] = int(seed)
@@ -296,6 +326,8 @@ def seed_params(params, seed):
 # -------------------------------------------------------------------------------------
 # Model fitting
 # -------------------------------------------------------------------------------------
+
+# Fits one valid fold and returns the full metric bundle plus best iteration
 def fit_valid_once(bundle, params, seed, early_stopping_rounds):
     seeded = seed_params(params, seed)
     model = lgb.LGBMClassifier(**seeded)
@@ -315,6 +347,7 @@ def fit_valid_once(bundle, params, seed, early_stopping_rounds):
     return metrics
 
 
+# Scores the main 2024 validation bundle across seeds, with Optuna pruning hooks if needed
 def evaluate_bundle(bundle, params, seed_list, early_stopping_rounds, trial=None, step_offset=0, label='holdout'):
     rows = []
     for step_idx, seed in enumerate(seed_list, start=1):
@@ -329,6 +362,7 @@ def evaluate_bundle(bundle, params, seed_list, early_stopping_rounds, trial=None
     return pd.DataFrame(rows)
 
 
+# Optional rolling-origin side score so tuning can penalize temporally brittle params
 def evaluate_rolling_bundles(rolling_bundles, params, seed_list, early_stopping_rounds, trial=None, step_offset=0):
     rows = []
     step = step_offset
@@ -351,6 +385,7 @@ def evaluate_rolling_bundles(rolling_bundles, params, seed_list, early_stopping_
     return pd.DataFrame(rows)
 
 
+# Final post-selection test scoring so the default and tuned setups can be compared cleanly
 def evaluate_final_on_test(run_bundle, params, seed_list, early_stopping_rounds, setup_name):
     rows = []
     features = run_bundle['features']
@@ -390,6 +425,8 @@ def evaluate_final_on_test(run_bundle, params, seed_list, early_stopping_rounds,
 # -------------------------------------------------------------------------------------
 # Optuna study
 # -------------------------------------------------------------------------------------
+
+# Builds the Optuna objective around the same year-aware contract as the canonical model
 def build_objective(run_bundle, args):
     holdout_weight = float(args.holdout_weight)
     rolling_weight = float(args.rolling_weight)
@@ -447,6 +484,7 @@ def build_objective(run_bundle, args):
     return objective
 
 
+# Turns the Optuna study into a readable trials table for later reporting
 def build_trials_frame(study):
     rows = []
     for trial in study.trials:
@@ -478,10 +516,12 @@ def build_trials_frame(study):
     ).reset_index(drop=True)
 
 
+# Tiny JSON writer so the best params and manifest stay human-readable
 def write_json(data, path):
     path.write_text(json.dumps(data, indent=2), encoding='utf-8')
 
 
+# Converts numpy and Path objects into plain JSON-safe values
 def json_ready(value):
     if isinstance(value, dict):
         return {key: json_ready(val) for key, val in value.items()}
@@ -499,6 +539,8 @@ def json_ready(value):
 # -------------------------------------------------------------------------------------
 # CLI
 # -------------------------------------------------------------------------------------
+
+# CLI arguments are explicit because this script is meant for long cloud runs, not notebook magic
 def parse_args():
     parser = argparse.ArgumentParser(
         description='Robust Optuna tuner for the canonical LightGBM satisfaction model'
@@ -533,6 +575,7 @@ def parse_args():
     return parser.parse_args()
 
 
+# Quick mode trims the study down for local smoke tests without touching the default cloud config
 def apply_quick_preset(args):
     if not args.quick:
         return args
@@ -550,6 +593,7 @@ def apply_quick_preset(args):
     return args
 
 
+# Runs the full tuning workflow and writes the readable artifacts to data/outputs
 def main():
     args = apply_quick_preset(parse_args())
     output_paths = build_output_paths(args.study_name, Path(args.output_root))

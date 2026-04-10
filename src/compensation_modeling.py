@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import lightgbm as lgb
 import numpy as np
 import optuna
@@ -11,26 +13,43 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from src import model_audit
 
+# -------------------------------------------------------------------------------------
+# Setup
+# -------------------------------------------------------------------------------------
+
+# Shared path to the canonical cleaned respondent-year table
+ROOT = Path(__file__).resolve().parents[1]
+CLEAN_PATH = ROOT / 'data' / 'derived' / 'clean_core.parquet'
+
+# Core random seed and target columns used throughout the compensation workflow
 RANDOM_STATE = 42
 TARGET_COL = model_audit.COMP_TARGET_LOG
 REAL_TARGET_COL = model_audit.COMP_TARGET_REAL
 REAL_WINSOR_COL = 'comp_real_2025_winsor'
 WINSOR_TARGET_COL = 'log_comp_real_2025_winsor'
+
+# The year windows that define the comparable core, tech-rich, and AI-era runs
 CORE_WINDOW_YEARS = [2019, 2020, 2021, 2022, 2023]
 TECH_WINDOW_YEARS = [2021, 2022, 2023]
 AI_WINDOW_YEARS = [2023]
 VALID_YEAR = 2024
 TEST_YEAR = 2025
+
+# How many top tech tokens to keep when turning the multiselects into boolean flags
 TOP_N_TECH = {
     'language': 15,
     'database': 10,
     'platform': 10
 }
+
+# Geography groups for the plain-English median baseline
 BASELINE_GROUP_SETS = [
     ['country_clean'],
     ['region'],
     []
 ]
+
+# Default and notebook-selected LightGBM presets for the canonical compensation runs
 DEFAULT_LGB_PARAMS = {
     'objective': 'regression_l1',
     'metric': 'l1',
@@ -70,6 +89,8 @@ LGB_PRESETS = {
     'tuned': NOTEBOOK_TUNED_LGB_PARAMS
 }
 SELECTED_LGB_PRESET = 'tuned'
+
+# Numeric columns that need coercion before any downstream modeling work
 NUMERIC_FIELDS = [
     'survey_year',
     'age_mid',
@@ -101,6 +122,8 @@ NUMERIC_FIELDS = [
 # -------------------------------------------------------------------------------------
 # Frame prep
 # -------------------------------------------------------------------------------------
+
+# Coerces the core numeric fields so downstream models don't trip over mixed dtypes
 def coerce_numeric_fields(frame, fields=None):
     out = frame.copy()
     fields = NUMERIC_FIELDS if fields is None else fields
@@ -116,12 +139,14 @@ def coerce_numeric_fields(frame, fields=None):
     return out
 
 
+# Adds a string version of survey year for categorical tree models
 def add_survey_year_str(frame):
     out = frame.copy()
     out['survey_year_str'] = out['survey_year'].astype('string')
     return out
 
 
+# Gets the compensation frame into one consistent modeling-friendly shape
 def coerce_compensation_frame(clean_core):
     frame = add_survey_year_str(clean_core)
     numeric_fields = NUMERIC_FIELDS + [col for col in frame.columns if col.startswith('role_')]
@@ -137,6 +162,7 @@ def coerce_compensation_frame(clean_core):
     return frame
 
 
+# Carves the cleaned table into the core, tech-rich, and AI-era compensation windows
 def get_comp_frames(clean_core):
     base = coerce_compensation_frame(clean_core)
     base = base.loc[
@@ -151,15 +177,18 @@ def get_comp_frames(clean_core):
     return core_df, tech_df, ai_df
 
 
+# Handy wrapper when we only want the canonical core compensation frame
 def prepare_compensation_frame(clean_core):
     core_df, _, _ = get_comp_frames(clean_core)
     return core_df.copy()
 
 
+# Pulls every role flag so the feature spec can stay readable elsewhere
 def get_role_cols(frame):
     return sorted(col for col in frame.columns if col.startswith('role_'))
 
 
+# Defines the core and later-wave feature sets in one auditable place
 def build_feature_sets(role_cols):
     core_cat = [
         'survey_year_str',
@@ -209,6 +238,8 @@ def build_compensation_bundle(clean_core):
 # -------------------------------------------------------------------------------------
 # Feature engineering
 # -------------------------------------------------------------------------------------
+
+# Finds the most common tech tokens so we can turn them into stable boolean flags
 def extract_top_techs(frame, column, n):
     tokens = (
         frame[column]
@@ -222,6 +253,7 @@ def extract_top_techs(frame, column, n):
     return tokens.value_counts().head(n).index.tolist()
 
 
+# Normalizes tech names into safe column labels
 def tech_flag_name(column, tech):
     safe = (
         tech.lower()
@@ -238,6 +270,7 @@ def tech_flag_name(column, tech):
     return f'{column}_{safe}'
 
 
+# Builds train-fit top-tech flags so we don't leak future token popularity backwards
 def add_top_tech_flags(frame, top_n_map=None, fit_frame=None):
     top_n_map = TOP_N_TECH if top_n_map is None else top_n_map
     fit_source = frame if fit_frame is None else fit_frame
@@ -266,6 +299,7 @@ def add_top_tech_flags(frame, top_n_map=None, fit_frame=None):
     return out, created
 
 
+# Splits a window and adds the same train-fit tech flags to each split
 def split_window_with_tech_flags(frame, train_years, valid_year, test_year, top_n_map=None):
     train_df, valid_df, test_df = model_audit.split_years(frame, train_years, valid_year, test_year)
     train_df, tech_flag_cols = add_top_tech_flags(train_df, top_n_map=top_n_map, fit_frame=train_df)
@@ -274,6 +308,7 @@ def split_window_with_tech_flags(frame, train_years, valid_year, test_year, top_
     return train_df, valid_df, test_df, tech_flag_cols
 
 
+# Creates a train-fit winsorized target for the upper-tail compensation experiments
 def add_winsor_targets(
     frame,
     fit_frame=None,
@@ -314,6 +349,8 @@ def add_winsor_targets(
 # -------------------------------------------------------------------------------------
 # Baselines and Ridge
 # -------------------------------------------------------------------------------------
+
+# Makes the feature frame play nicely with sklearn pipelines and imputers
 def normalize_feature_frame(frame, cat_cols, num_cols):
     out = frame.copy()
 
@@ -327,6 +364,7 @@ def normalize_feature_frame(frame, cat_cols, num_cols):
     return out
 
 
+# Straightforward one-hot plus scale preprocessing for the Ridge baseline
 def build_ridge_pipe(cat_cols, num_cols):
     prep = ColumnTransformer([
         (
@@ -352,6 +390,7 @@ def build_ridge_pipe(cat_cols, num_cols):
     ])
 
 
+# Geography median is the plain-English benchmark we expect every real model to beat
 def score_holdout_baseline(train_df, valid_df, test_df, group_sets=None):
     group_sets = BASELINE_GROUP_SETS if group_sets is None else group_sets
     valid_metrics = model_audit.score_hier_median(train_df, valid_df, group_sets)
@@ -363,6 +402,7 @@ def score_holdout_baseline(train_df, valid_df, test_df, group_sets=None):
     }
 
 
+# Fits the interpretable linear baseline before we trust the tree models
 def fit_ridge_holdout(train_df, valid_df, test_df, cat_cols, num_cols, target_col=TARGET_COL, alphas=None):
     alphas = [1.0, 5.0, 10.0, 25.0] if alphas is None else alphas
     feature_cols = cat_cols + num_cols
@@ -402,6 +442,8 @@ def fit_ridge_holdout(train_df, valid_df, test_df, cat_cols, num_cols, target_co
 # -------------------------------------------------------------------------------------
 # LightGBM
 # -------------------------------------------------------------------------------------
+
+# Preps categorical and numeric fields for LightGBM without changing the train/test contract
 def prepare_lgbm_frame(frame, cat_cols, num_cols, target_col=TARGET_COL):
     out = coerce_compensation_frame(frame)
     out = out.copy()
@@ -423,6 +465,7 @@ def prepare_lgbm_frame(frame, cat_cols, num_cols, target_col=TARGET_COL):
     return out, num_imputer
 
 
+# Applies the saved numeric imputer so valid and test get the same treatment as train
 def transform_lgbm_frame(frame, cat_cols, num_cols, num_imputer, target_col=TARGET_COL):
     out = coerce_compensation_frame(frame)
     out = out.copy()
@@ -443,6 +486,7 @@ def transform_lgbm_frame(frame, cat_cols, num_cols, num_imputer, target_col=TARG
     return out
 
 
+# Resolves preset, manual overrides, and optional device choice in one place
 def resolve_lgb_params(params=None, preset=None, device_type=None):
     if preset is None:
         preset = SELECTED_LGB_PRESET
@@ -459,6 +503,7 @@ def resolve_lgb_params(params=None, preset=None, device_type=None):
     return resolved
 
 
+# Small Optuna tuner used for bounded local LightGBM searches
 def tune_lightgbm(
     train_df,
     valid_df,
@@ -504,6 +549,7 @@ def tune_lightgbm(
     return best_params
 
 
+# Standard single-stage LightGBM regression fit on the year-aware holdout contract
 def fit_lightgbm_holdout(
     train_df,
     valid_df,
@@ -569,6 +615,7 @@ def fit_lightgbm_holdout(
     }
 
 
+# Variant that trains on a train-fit winsorized target while still scoring on real compensation
 def fit_lightgbm_winsor_holdout(
     train_df,
     valid_df,
@@ -660,6 +707,8 @@ def fit_lightgbm_winsor_holdout(
 # -------------------------------------------------------------------------------------
 # Canonical workflows
 # -------------------------------------------------------------------------------------
+
+# Main compensation comparison table used to lock the canonical model choice
 def compare_same_sample_setups(
     clean_core,
     lgb_params=None,
@@ -829,6 +878,7 @@ def compare_same_sample_setups(
     }
 
 
+# Returns the locked compensation model fit and the feature columns used to train it
 def fit_selected_compensation_model(
     clean_core,
     lgb_params=None,
@@ -872,6 +922,7 @@ def fit_selected_compensation_model(
     }
 
 
+# Rolling-origin helper used to check whether a setup holds up as the train window expands
 def rolling_origin_lightgbm(
     frame,
     cat_cols,
@@ -942,6 +993,7 @@ def rolling_origin_lightgbm(
     return pd.DataFrame(rows)
 
 
+# Compares the baseline and LightGBM families under rolling-origin validation
 def rolling_origin_setup_comparison(
     clean_core,
     ridge_alphas=None,
@@ -1053,3 +1105,22 @@ def rolling_origin_setup_comparison(
         'results': rows,
         'summary': summary
     }
+
+
+# -------------------------------------------------------------------------------------
+# Main
+# -------------------------------------------------------------------------------------
+
+# Runs the canonical compensation comparison table directly from the cleaned parquet
+def main():
+    from src import comp_clean
+
+    clean_core = comp_clean.load_clean_core(CLEAN_PATH)
+    results = compare_same_sample_setups(clean_core)
+
+    print(results['summary'].to_string(index=False))
+    print(f"Selected main setup: {results['selected_main_setup']}")
+
+
+if __name__ == '__main__':
+    main()
