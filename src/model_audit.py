@@ -14,28 +14,6 @@ COMP_TARGET_LOG = 'log_comp_real_2025'
 COMP_TARGET_REAL = 'comp_real_2025'
 SAT_LABELS = [1, 2, 3, 4, 5]
 
-SAT_MAP = {
-    "I hate my job": 1,
-    "I'm somewhat dissatisfied with my job": 2,
-    "I'm neither satisfied nor dissatisfied with my job": 3,
-    "I'm neither satisfied nor dissatisfied": 3,
-    "I'm somewhat satisfied with my job": 4,
-    "I love my job": 5,
-    "I don't have a job": np.nan,
-    "Other (please specify)": np.nan,
-    'Extremely dissatisfied': 1,
-    'Moderately dissatisfied': 2,
-    'Slightly dissatisfied': 2,
-    'Neither satisfied nor dissatisfied': 3,
-    'Slightly satisfied': 4,
-    'Moderately satisfied': 4,
-    'Extremely satisfied': 5,
-    'Very dissatisfied': 1,
-    'Very satisfied': 5
-}
-
-JOB_SAT_YEARS = [2015, 2016, 2017, 2018, 2019, 2020, 2024, 2025]
-
 
 def paid_work_mask(frame):
     flag_cols = [
@@ -114,34 +92,15 @@ def score_hier_median(train_df, score_df, group_sets, target_col=COMP_TARGET_LOG
 
 
 def standardize_job_sat_value(value, survey_year):
-    if pd.isna(value):
-        return np.nan
+    from src import satisfaction_modeling
 
-    if survey_year in {2017, 2024, 2025}:
-        try:
-            numeric = float(value)
-        except ValueError:
-            return np.nan
-        if numeric <= 1:
-            return 1
-        if numeric <= 4:
-            return 2
-        if numeric <= 6:
-            return 3
-        if numeric <= 8:
-            return 4
-        return 5
-
-    return SAT_MAP.get(value, np.nan)
+    return satisfaction_modeling.standardize_job_sat_value(value, survey_year)
 
 
 def add_job_sat_std(frame):
-    out = frame.copy()
-    out['job_sat_std'] = [
-        standardize_job_sat_value(value, year)
-        for value, year in zip(out['job_sat'], out['survey_year'], strict=False)
-    ]
-    return out
+    from src import satisfaction_modeling
+
+    return satisfaction_modeling.add_job_sat_std(frame)
 
 
 def build_job_sat_model_frame(
@@ -150,47 +109,29 @@ def build_job_sat_model_frame(
     require_professional=True,
     require_employed=True
 ):
-    include_years = JOB_SAT_YEARS if include_years is None else include_years
-    frame = add_job_sat_std(clean_core)
-    frame = frame.loc[frame['survey_year'].isin(include_years)].copy()
-    frame = frame.loc[frame['job_sat_std'].notna()].copy()
+    from src import satisfaction_modeling
 
-    if require_professional:
-        frame = frame.loc[frame['is_professional']].copy()
-    if require_employed:
-        frame = frame.loc[paid_work_mask(frame)].copy()
-
-    return frame
-
-
-def job_sat_year_summary(clean_core):
-    frame = add_job_sat_std(clean_core)
-    employed_mask = paid_work_mask(frame)
-    return (
-        frame
-        .groupby('survey_year')
-        .agg(
-            rows=('survey_year', 'size'),
-            raw_non_null=('job_sat', lambda series: int(series.notna().sum())),
-            harmonized_non_null=('job_sat_std', lambda series: int(series.notna().sum())),
-            employed_prof_non_null=(
-                'job_sat_std',
-                lambda series: int(
-                    series.loc[
-                        frame.loc[series.index, 'is_professional']
-                        & employed_mask.loc[series.index]
-                    ].notna().sum()
-                )
-            )
-        )
-        .reset_index()
+    return satisfaction_modeling.build_satisfaction_frame(
+        clean_core,
+        include_years=include_years,
+        require_professional=require_professional,
+        require_employed=require_employed
     )
 
 
+def job_sat_year_summary(clean_core):
+    from src import satisfaction_modeling
+
+    return satisfaction_modeling.job_sat_year_summary(clean_core)
+
+
 def score_sat_classification(y_true, y_pred, labels=SAT_LABELS):
+    from src import satisfaction_modeling
+
+    scored = satisfaction_modeling.score_satisfaction(y_true, y_pred, labels=labels)
     return {
-        'accuracy': accuracy_score(y_true, y_pred),
-        'macro_f1': f1_score(y_true, y_pred, labels=labels, average='macro', zero_division=0),
-        'weighted_f1': f1_score(y_true, y_pred, labels=labels, average='weighted', zero_division=0),
-        'qwk': cohen_kappa_score(y_true, y_pred, labels=labels, weights='quadratic')
+        'accuracy': scored['accuracy'],
+        'macro_f1': scored['macro_f1'],
+        'weighted_f1': scored['weighted_f1'],
+        'qwk': scored['qwk']
     }
