@@ -1,9 +1,3 @@
-"""
-This file takes the findings from the Cleaning.ipynb and consolidates them into a
-single, repeatable process to build a cleaned set of data ready for compensation
-modeling. Creates a parquet output under data/derived/clean_core.parquet
-"""
-
 import logging
 import re
 import warnings
@@ -37,10 +31,12 @@ RAW_FIELDS = [
     'main_branch',
     'student',
     'employment',
+    'employment_addl',
     'education',
     'undergrad_major',
     'age_first_code',
     'org_size',
+    'ic_or_pm',
     'dev_type',
     'industry',
     'remote',
@@ -336,10 +332,12 @@ YEAR_INFO = {
         'main_branch': 'MainBranch',
         'student': None,
         'employment': 'Employment',
+        'employment_addl': None,
         'education': 'EdLevel',
         'undergrad_major': None,
         'age_first_code': None,
         'org_size': 'OrgSize',
+        'ic_or_pm': 'ICorPM',
         'dev_type': 'DevType',
         'industry': None,
         'remote': 'RemoteWork',
@@ -373,10 +371,12 @@ YEAR_INFO = {
         'main_branch': 'MainBranch',
         'student': None,
         'employment': 'Employment',
+        'employment_addl': None,
         'education': 'EdLevel',
         'undergrad_major': None,
         'age_first_code': None,
         'org_size': 'OrgSize',
+        'ic_or_pm': 'ICorPM',
         'dev_type': 'DevType',
         'industry': 'Industry',
         'remote': 'RemoteWork',
@@ -410,10 +410,12 @@ YEAR_INFO = {
         'main_branch': 'MainBranch',
         'student': None,
         'employment': 'Employment',
+        'employment_addl': None,
         'education': 'EdLevel',
         'undergrad_major': None,
         'age_first_code': None,
         'org_size': 'OrgSize',
+        'ic_or_pm': 'ICorPM',
         'dev_type': 'DevType',
         'industry': 'Industry',
         'remote': 'RemoteWork',
@@ -447,10 +449,12 @@ YEAR_INFO = {
         'main_branch': 'MainBranch',
         'student': None,
         'employment': 'Employment',
+        'employment_addl': 'EmploymentAddl',
         'education': 'EdLevel',
         'undergrad_major': None,
         'age_first_code': None,
         'org_size': 'OrgSize',
+        'ic_or_pm': 'ICorPM',
         'dev_type': 'DevType',
         'industry': 'Industry',
         'remote': 'RemoteWork',
@@ -532,13 +536,13 @@ NUMERIC_RULES = [
     },
     {
         'field': 'years_code_pro',
-        'clean_field': None,
+        'clean_field': 'years_code_pro_clean',
         'min': 0,
         'max': 50
     },
     {
         'field': 'work_exp',
-        'clean_field': None,
+        'clean_field': 'work_exp_clean',
         'min': 0,
         'max': 50
     },
@@ -806,8 +810,8 @@ def parse_midpoint(value):
         return np.nan
     if len(numbers) >= 2:
         return sum(numbers[:2]) / 2
-    if 'under' in lower or text.startswith('<'):
-        return max(numbers[0] - 1, 0)
+    if 'under' in lower or 'less than' in lower or 'younger than' in lower or text.startswith('<'):
+        return max(numbers[0] / 2, 0)
     return numbers[0]
 
 
@@ -914,7 +918,7 @@ def read_year(year, columns):
 # Takes all the years and makes a unified DataFrame with a standardized format
 def load_year(year):
     info = YEAR_INFO[year]
-    selected = [info[field] for field in RAW_FIELDS if info[field] is not None]
+    selected = [info.get(field) for field in RAW_FIELDS if info.get(field) is not None]
 
     if year == 2015:
         selected += [col for _, col in EDU_2015_LEVELS]
@@ -929,7 +933,7 @@ def load_year(year):
     out['survey_year'] = year
 
     for field in RAW_FIELDS:
-        raw_col = info[field]
+        raw_col = info.get(field)
         out[field] = df[raw_col] if raw_col in df.columns else pd.NA
 
     out['current_tech'] = pd.NA
@@ -1038,7 +1042,7 @@ def clean_org_size(value):
     if pd.isna(value):
         return pd.NA
     lower = str(value).strip().lower()
-    if any(term in lower for term in ["don't know", 'don?t know', 'not sure', 'prefer not']):
+    if any(term in lower for term in ["don't know", 'don?t know', 'don’t know', 'not sure', 'prefer not']):
         return pd.NA
     if 'just me' in lower or 'not part of a company' in lower:
         return 'Self-employed'
@@ -1075,6 +1079,80 @@ def clean_org_size(value):
     if '10,000 or more employees' in lower or '10,000+ employees' in lower:
         return '10,000+'
     return pd.NA
+
+
+# Cleans later-wave contributor vs manager signal into one stable field
+def clean_ic_or_pm(value):
+    if pd.isna(value):
+        return pd.NA
+    lower = str(value).strip().lower()
+    if 'contributor' in lower:
+        return 'Individual contributor'
+    if 'manager' in lower:
+        return 'People manager'
+    if 'prefer not' in lower:
+        return pd.NA
+    return pd.NA
+
+
+# Industry gets messy across years, so this keeps the buckets broad and stable
+def clean_industry(value, survey_year):
+    if pd.isna(value) or survey_year == 2017:
+        return pd.NA
+
+    lower = str(value).strip().lower()
+    lower = lower.replace('&', 'and')
+
+    if any(term in lower for term in ['prefer not', "i'm a student", 'not currently employed']):
+        return pd.NA
+    if lower in {'other', 'other:', 'other (please specify)'}:
+        return 'Other / unclear'
+    if any(term in lower for term in [
+        'software development',
+        'software products',
+        'web services',
+        'information services',
+        'technology',
+        'internet',
+        'telecomm',
+        'telecommunications',
+        'computer systems design'
+    ]):
+        return 'Software / IT'
+    if any(term in lower for term in [
+        'financial services',
+        'finance / banking',
+        'banking/financial services',
+        'fintech',
+        'insurance'
+    ]):
+        return 'Financial services'
+    if 'healthcare' in lower:
+        return 'Healthcare'
+    if any(term in lower for term in [
+        'manufacturing',
+        'transportation',
+        'supply chain',
+        'automotive',
+        'aerospace',
+        'defense'
+    ]):
+        return 'Manufacturing / logistics'
+    if any(term in lower for term in ['government', 'public sector', 'state-owned']):
+        return 'Government / public'
+    if 'education' in lower or 'university' in lower or 'school' in lower:
+        return 'Education'
+    if any(term in lower for term in ['retail', 'consumer products', 'consumer services', 'wholesale']):
+        return 'Retail / consumer'
+    if any(term in lower for term in ['media', 'advertising']):
+        return 'Media / advertising'
+    if any(term in lower for term in ['energy', 'oil and gas', 'oil & gas', 'utilities']):
+        return 'Energy / utilities'
+    if any(term in lower for term in ['consulting', 'legal services']):
+        return 'Professional services'
+    if any(term in lower for term in ['non-profit', 'nonprofit', 'foundation']):
+        return 'Non-profit'
+    return 'Other / unclear'
 
 
 # Remote has many values that can vaguely describe the same thing, this creates three neat groups
@@ -1128,20 +1206,34 @@ def role_family(token):
     if pd.isna(token):
         return pd.NA
     text = str(token).strip().lower()
+    if 'architect' in text:
+        return 'Architecture'
+    if 'developer advocate' in text or 'developer experience' in text or 'devrel' in text:
+        return 'Advocacy / DX'
+    if 'designer' in text or 'ux' in text or 'ui' in text:
+        return 'Design / UX'
+    if 'embedded' in text or 'firmware' in text or 'hardware' in text:
+        return 'Embedded / hardware'
+    if 'game' in text or 'graphics' in text:
+        return 'Game / graphics'
     if 'full-stack' in text:
         return 'Full-stack'
     if 'back-end' in text or 'backend' in text or 'server' in text:
         return 'Back-end'
     if 'front-end' in text or 'frontend' in text:
         return 'Front-end'
-    if 'data' in text or 'machine learning' in text or 'scientist' in text or 'analyst' in text:
+    if 'web developer' in text:
+        return 'Full-stack'
+    if 'data' in text or 'machine learning' in text or 'scientist' in text or 'analyst' in text or 'ai/ml' in text:
         return 'Data / ML'
     if 'mobile' in text or 'ios' in text or 'android' in text:
         return 'Mobile'
-    if 'devops' in text or 'site reliability' in text or 'cloud' in text or 'system administrator' in text:
+    if any(term in text for term in ['devops', 'site reliability', 'cloud', 'system administrator', 'systems administrator', 'sysadmin']):
         return 'DevOps / Cloud'
     if 'desktop' in text or 'enterprise' in text:
         return 'Desktop / Enterprise'
+    if 'security' in text:
+        return 'Security'
     if 'manager' in text or 'executive' in text:
         return 'Management'
     if 'student' in text or 'academic researcher' in text or 'educator' in text:
@@ -1307,6 +1399,11 @@ def validate_clean_core(clean_core=None):
         'country',
         'country_clean',
         'region',
+        'employment_primary',
+        'industry_clean',
+        'ic_or_pm_clean',
+        'years_code_pro_clean',
+        'work_exp_clean',
         'comp_usd_clean',
         'log_comp_real_2025',
         'comp_real_2025',
@@ -1348,6 +1445,40 @@ def validate_clean_core(clean_core=None):
     if not clean_core.loc[clean_core['country_clean'].isna(), 'region'].isna().all():
         errors.append('region should be missing when country_clean is missing')
 
+    if not clean_core.loc[
+        clean_core['years_code_pro_clean'].notna() & clean_core['years_code_clean'].notna(),
+        'years_code_pro_clean'
+    ].le(
+        clean_core.loc[
+            clean_core['years_code_pro_clean'].notna() & clean_core['years_code_clean'].notna(),
+            'years_code_clean'
+        ]
+    ).all():
+        errors.append('years_code_pro_clean must be less than or equal to years_code_clean when both are present')
+
+    employment_allowed = {
+        'Employed full-time',
+        'Employed part-time',
+        'Independent / contract',
+        'Student',
+        'Retired',
+        'Not employed',
+        'Other'
+    }
+    employment_values = set(clean_core['employment_primary'].dropna().unique())
+    if not employment_values.issubset(employment_allowed):
+        extra = ', '.join(sorted(employment_values - employment_allowed))
+        errors.append(f"Unexpected employment_primary values: {extra}")
+
+    ic_or_pm_allowed = {
+        'Individual contributor',
+        'People manager'
+    }
+    ic_or_pm_values = set(clean_core['ic_or_pm_clean'].dropna().unique())
+    if not ic_or_pm_values.issubset(ic_or_pm_allowed):
+        extra = ', '.join(sorted(ic_or_pm_values - ic_or_pm_allowed))
+        errors.append(f"Unexpected ic_or_pm_clean values: {extra}")
+
     if not (clean_core['is_comp_model_core'] == (clean_core['is_comp_analysis_sample'] & clean_core['survey_year'].ge(2019))).all():
         errors.append('is_comp_model_core must match 2019+ compensation analysis sample')
     if not (clean_core['is_comp_model_tech_rich'] == (clean_core['is_comp_analysis_sample'] & clean_core['survey_year'].ge(2021))).all():
@@ -1371,43 +1502,70 @@ def build_clean_core():
     clean = pd.concat([load_year(year) for year in YEARS], ignore_index=True)
 
     employment_text = lower_text(clean['employment'])
+    employment_addl_text = lower_text(clean['employment_addl'])
     branch_text = lower_text(clean['main_branch'])
     dev_text = lower_text(clean['dev_type'])
     student_text = lower_text(clean['student'])
 
-    # Explicitly sets standard employment type groupings
-    employment_group = np.select(
+    # 2025 split employment into a main status and add-on statuses, so we keep both the anchor and overlap
+    addl_part_time = employment_addl_text.str.contains(
+        'engaged in paid work \\(less than 10 hours per week\\)|engaged in paid work \\(10-19 hours per week\\)|engaged in paid work \\(20-29 hours per week\\)'
+    )
+    addl_student = employment_addl_text.str.contains('attending school')
+    addl_retired = employment_addl_text.str.contains('transitioning to retirement')
+
+    clean['is_independent'] = employment_text.str.contains('self-employed|independent contractor|freelance|contractor')
+    clean['is_full_time_employed'] = employment_text.str.contains('full-time') | (employment_text.eq('employed') & ~addl_part_time)
+    clean['is_part_time_employed'] = (employment_text.str.contains('part-time') | addl_part_time) & ~clean['is_full_time_employed']
+    clean['is_student_status'] = student_text.str.contains('yes|student') | employment_text.str.contains('student') | addl_student
+    clean['is_retired_status'] = employment_text.str.contains('retired') | addl_retired
+    clean['is_not_employed'] = employment_text.str.contains('not employed') & ~(
+        clean['is_full_time_employed']
+        | clean['is_part_time_employed']
+        | clean['is_independent']
+    )
+
+    employment_primary = np.select(
         [
-            employment_text.str.contains('self-employed|independent contractor|freelance|contractor'),
-            employment_text.str.contains('part-time') & employment_text.str.contains('employed'),
-            employment_text.str.contains('full-time') & employment_text.str.contains('employed'),
-            employment_text.str.contains('not employed'),
-            student_text.str.contains('yes|student') | employment_text.str.contains('student')
+            employment_text.eq('employed') & addl_part_time,
+            employment_text.eq('employed'),
+            employment_text.eq('independent contractor, freelancer, or self-employed'),
+            employment_text.eq('student'),
+            employment_text.eq('retired'),
+            employment_text.eq('not employed'),
+            clean['is_full_time_employed'],
+            clean['is_independent'],
+            clean['is_part_time_employed'],
+            clean['is_student_status'],
+            clean['is_retired_status'],
+            clean['is_not_employed']
         ],
         [
-            'Independent / contract',
             'Employed part-time',
             'Employed full-time',
+            'Independent / contract',
+            'Student',
+            'Retired',
             'Not employed',
-            'Student'
+            'Employed full-time',
+            'Independent / contract',
+            'Employed part-time',
+            'Student',
+            'Retired',
+            'Not employed'
         ],
         default='Other'
     )
 
-    clean['employment_group'] = pd.Series(employment_group, index=clean.index).where(
-        clean['employment'].notna() | clean['student'].notna(),
+    clean['employment_primary'] = pd.Series(employment_primary, index=clean.index).where(
+        clean['employment'].notna() | clean['student'].notna() | clean['employment_addl'].notna(),
         pd.NA
     )
+    clean['employment_group'] = clean['employment_primary']
+    clean['is_paid_worker'] = clean['is_full_time_employed'] | clean['is_part_time_employed'] | clean['is_independent']
+    clean['is_employed'] = clean['is_paid_worker']
 
-    # Explicitly flags whether someone is employed or not
-    clean['is_employed'] = (
-        employment_text.str.contains('employed')
-        | employment_text.str.contains('contractor')
-        | employment_text.str.contains('freelance')
-        | employment_text.str.contains('self-employed')
-    ) & ~employment_text.str.contains('not employed')
-
-    # Explicitly sets if someone works in data field professionally
+    # Explicitly sets if someone works in the field professionally
     branch_prof = (
         branch_text.str.contains('developer by profession')
         | branch_text.eq('professional developer')
@@ -1416,7 +1574,7 @@ def build_clean_core():
     clean['is_professional'] = np.where(
         branch_text.ne(''),
         branch_prof,
-        clean['is_employed'] & ~dev_text.str.contains('student')
+        clean['is_paid_worker'] & ~dev_text.str.contains('student')
     )
 
     # Final mapping of countries and regions
@@ -1431,6 +1589,11 @@ def build_clean_core():
     clean['education_clean'] = clean['education'].map(clean_education)
     clean['org_size_clean'] = clean['org_size'].map(clean_org_size)
     clean['remote_group'] = clean['remote'].map(group_remote)
+    clean['industry_clean'] = [
+        clean_industry(value, year)
+        for value, year in zip(clean['industry'], clean['survey_year'], strict=False)
+    ]
+    clean['ic_or_pm_clean'] = clean['ic_or_pm'].map(clean_ic_or_pm)
 
     # Clean multiselect text so counts are based on real values rather than raw survey quirks
     clean['language'] = clean['language'].map(
@@ -1459,7 +1622,19 @@ def build_clean_core():
         & clean['years_code_clean'].notna(),
         'years_code_pro_clean'
     ] = np.nan
-    clean['professional_experience_years'] = clean['years_code_pro_clean'].combine_first(clean['work_exp_clean'])
+    clean['experience_proxy_years'] = clean['years_code_pro_clean'].combine_first(clean['work_exp_clean'])
+    clean['experience_proxy_source'] = np.select(
+        [
+            clean['years_code_pro_clean'].notna(),
+            clean['work_exp_clean'].notna()
+        ],
+        [
+            'years_code_pro',
+            'work_exp'
+        ],
+        default=pd.NA
+    )
+    clean['professional_experience_years'] = clean['experience_proxy_years']
     clean['comp_usd_clean'] = clean['comp_usd'].where(clean['comp_usd'].between(1000, 1_000_000))
     clean['log_comp_usd_clean'] = np.log(clean['comp_usd_clean'])
     clean['age_group'] = pd.cut(
@@ -1489,7 +1664,7 @@ def build_clean_core():
     clean['is_comp_analysis_sample'] = (
         clean['is_professional']
         & clean['comp_usd_clean'].notna()
-        & clean['employment_group'].ne('Not employed')
+        & clean['is_paid_worker']
     )
 
     # Defines model windows
@@ -1543,8 +1718,17 @@ def build_clean_core():
         'main_branch',
         'student',
         'employment',
+        'employment_addl',
+        'employment_primary',
         'employment_group',
         'is_employed',
+        'is_paid_worker',
+        'is_full_time_employed',
+        'is_part_time_employed',
+        'is_independent',
+        'is_student_status',
+        'is_retired_status',
+        'is_not_employed',
         'is_professional',
         'education',
         'education_clean',
@@ -1553,8 +1737,11 @@ def build_clean_core():
         'age_first_code_clean',
         'org_size',
         'org_size_clean',
+        'ic_or_pm',
+        'ic_or_pm_clean',
         'dev_type',
         'industry',
+        'industry_clean',
         'remote',
         'remote_group',
         'job_seek',
@@ -1584,7 +1771,11 @@ def build_clean_core():
         'years_code',
         'years_code_clean',
         'years_code_pro',
+        'years_code_pro_clean',
         'work_exp',
+        'work_exp_clean',
+        'experience_proxy_years',
+        'experience_proxy_source',
         'professional_experience_years',
         'job_sat',
         'job_sat_num',

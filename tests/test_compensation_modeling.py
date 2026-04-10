@@ -1,0 +1,253 @@
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from src import compensation_modeling
+
+PARQUET_PATH = Path('data/derived/clean_core.parquet')
+
+
+def make_comp_frame():
+    rows = []
+    countries = ['United States', 'Germany', 'India']
+    regions = ['Americas', 'Europe', 'Asia']
+    employment_groups = ['Employed full-time', 'Employed part-time', 'Independent / contract']
+    educations = ["Bachelor's degree", "Master's degree", 'Professional degree']
+    org_sizes = ['1-19', '20-99', '100-999']
+    industries = ['Software / IT', 'Financial services', 'Manufacturing / logistics']
+    ic_or_pm = ['Individual contributor', 'People manager', 'Individual contributor']
+    remotes = ['Mostly in-person', 'Hybrid', 'Mostly remote']
+    ai_uses = ['Yes', 'No', 'Yes']
+    ai_sents = ['Positive', 'Neutral', 'Negative']
+    languages = ['Python;JavaScript', 'Python;Rust', 'SQL;Go']
+    databases = ['PostgreSQL;Redis', 'Redis;MongoDB', 'PostgreSQL;MongoDB']
+    platforms = ['AWS;Docker', 'AWS;Azure', 'Azure;GCP']
+
+    for year in range(2019, 2026):
+        for idx in range(3):
+            comp_real = 80_000 + (year - 2019) * 7_500 + idx * 2_500
+            rows.append({
+                'survey_year': year,
+                'country_clean': countries[idx],
+                'region': regions[idx],
+                'is_comp_model_sample': True,
+                'is_professional': True,
+                'employment_primary': employment_groups[idx],
+                'employment_group': employment_groups[idx],
+                'is_full_time_employed': idx == 0,
+                'is_part_time_employed': idx == 1,
+                'is_independent': idx == 2,
+                'is_student_status': False,
+                'is_retired_status': False,
+                'education_clean': educations[idx],
+                'org_size_clean': org_sizes[idx],
+                'industry_clean': industries[idx],
+                'ic_or_pm_clean': ic_or_pm[idx],
+                'remote_group': remotes[idx],
+                'ai_use': ai_uses[idx] if year >= 2023 else pd.NA,
+                'ai_sent': ai_sents[idx] if year >= 2023 else pd.NA,
+                'age_mid': str(25 + idx),
+                'years_code_pro_clean': str(4 + idx),
+                'work_exp_clean': str(5 + idx),
+                'professional_experience_years': str(4 + idx),
+                'language_count': str(1 + idx),
+                'database_count': str(2 + idx),
+                'platform_count': str(1 + idx),
+                'webframe_count': str(idx),
+                'misc_tech_count': str(idx),
+                'learn_code_count': str(2 + idx),
+                'learn_code_online_count': str(idx),
+                'coding_activities_count': str(1 + idx),
+                'op_sys_prof_count': str(idx),
+                'role_full_stack': str(int(idx == 0)),
+                'role_back_end': str(int(idx == 1)),
+                'role_data_ml': str(int(idx == 2)),
+                'language': languages[idx],
+                'database': databases[idx],
+                'platform': platforms[idx],
+                'comp_usd_clean': str(comp_real),
+                'comp_real_2025': str(comp_real),
+                'log_comp_real_2025': str(np.log(comp_real))
+            })
+
+    return pd.DataFrame(rows)
+
+
+def test_coerce_compensation_frame_normalizes_numeric_fields_and_year_string():
+    frame = make_comp_frame().iloc[:2].copy()
+    frame['role_full_stack'] = ['1', '0']
+    frame['language_count'] = ['4', 'not a number']
+
+    coerced = compensation_modeling.coerce_compensation_frame(frame)
+
+    assert coerced['survey_year_str'].tolist() == ['2019', '2019']
+    assert pd.api.types.is_numeric_dtype(coerced['language_count'])
+    assert pd.api.types.is_numeric_dtype(coerced[compensation_modeling.TARGET_COL])
+    assert np.isclose(coerced['role_full_stack'].iloc[0], 1.0)
+    assert np.isnan(coerced['language_count'].iloc[1])
+
+
+def test_add_top_tech_flags_uses_fit_frame_and_fills_expected_columns():
+    fit_frame = pd.DataFrame({
+        'language': ['Python;JavaScript', 'Python;Rust', 'SQL;Go'],
+        'database': ['PostgreSQL;Redis', 'Redis;MongoDB', 'MongoDB;PostgreSQL'],
+        'platform': ['AWS;Docker', 'AWS;Azure', 'Azure;GCP']
+    })
+    frame = pd.DataFrame({
+        'language': ['Python;Rust', 'Go;SQL', None],
+        'database': ['Redis', 'MongoDB', None],
+        'platform': ['AWS', 'GCP', None]
+    })
+
+    flagged, created = compensation_modeling.add_top_tech_flags(
+        frame,
+        top_n_map={'language': 2, 'database': 1, 'platform': 1},
+        fit_frame=fit_frame
+    )
+
+    assert set(created) == {
+        'language_python',
+        'language_javascript',
+        'database_postgresql',
+        'platform_aws'
+    }
+    assert flagged['language_python'].tolist() == [1, 0, 0]
+    assert flagged['database_postgresql'].tolist() == [0, 0, 0]
+    assert flagged['platform_aws'].tolist() == [1, 0, 0]
+
+
+def test_tech_flag_name_avoids_common_token_collisions():
+    assert compensation_modeling.tech_flag_name('language', 'C') == 'language_c'
+    assert compensation_modeling.tech_flag_name('language', 'C++') == 'language_c_plusplus'
+    assert compensation_modeling.tech_flag_name('language', 'C#') == 'language_c_sharp'
+
+
+def test_add_top_tech_flags_matches_full_tokens_not_substrings():
+    fit_frame = pd.DataFrame({
+        'language': ['C;Rust', 'C++;SQL', 'C++;Go', 'C#;Rust', 'C#;Go']
+    })
+    frame = pd.DataFrame({
+        'language': ['C++', 'C#', 'Objective-C', 'C']
+    })
+
+    flagged, created = compensation_modeling.add_top_tech_flags(
+        frame,
+        top_n_map={'language': 7},
+        fit_frame=fit_frame
+    )
+
+    assert {'language_c', 'language_c_plusplus', 'language_c_sharp'}.issubset(set(created))
+    assert flagged['language_c'].tolist() == [0, 0, 0, 1]
+    assert flagged['language_c_plusplus'].tolist() == [1, 0, 0, 0]
+    assert flagged['language_c_sharp'].tolist() == [0, 1, 0, 0]
+
+
+def test_prepare_lgbm_frame_and_winsor_targets_support_small_frames():
+    frame = make_comp_frame().iloc[:9].copy()
+    frame = compensation_modeling.add_winsor_targets(frame)
+
+    assert compensation_modeling.REAL_WINSOR_COL in frame.columns
+    assert compensation_modeling.WINSOR_TARGET_COL in frame.columns
+    assert np.isfinite(frame[compensation_modeling.WINSOR_TARGET_COL]).all()
+
+    prepared, num_imputer = compensation_modeling.prepare_lgbm_frame(
+        frame,
+        ['country_clean', 'region'],
+        ['age_mid', 'professional_experience_years', 'language_count']
+    )
+
+    assert str(prepared['country_clean'].dtype) == 'category'
+    assert str(prepared['region'].dtype) == 'category'
+    assert pd.api.types.is_numeric_dtype(prepared['age_mid'])
+    assert num_imputer.statistics_.shape[0] == 3
+
+
+def test_build_compensation_bundle_runs_on_saved_parquet():
+    clean_core = pd.read_parquet(PARQUET_PATH)
+
+    bundle = compensation_modeling.build_compensation_bundle(clean_core)
+
+    assert {'core_df', 'tech_df', 'ai_df', 'role_cols', 'feature_sets'} == set(bundle)
+    assert bundle['core_df']['survey_year'].min() >= 2019
+    assert bundle['tech_df']['survey_year'].min() >= 2021
+    assert bundle['ai_df']['survey_year'].min() >= 2023
+    assert len(bundle['role_cols']) > 0
+
+
+def test_compare_same_sample_setups_runs_on_synthetic_data():
+    frame = make_comp_frame()
+    result = compensation_modeling.compare_same_sample_setups(
+        frame,
+        lgb_params={
+            'n_estimators': 20,
+            'learning_rate': 0.1,
+            'num_leaves': 7,
+            'min_child_samples': 1
+        }
+    )
+
+    summary = result['summary']
+
+    assert {
+        'Country-region median baseline',
+        'Ridge core',
+        'LightGBM core',
+        'LightGBM core + top tech flags',
+        'LightGBM winsorized target + top tech flags',
+        'LightGBM tech-rich window',
+        'LightGBM AI-era window'
+    }.issubset(set(summary['setup']))
+    assert np.isfinite(summary['valid_medae_real']).all()
+    assert np.isfinite(summary['test_medae_real']).all()
+    assert set(result['bundle']) == {
+        'core_df',
+        'tech_df',
+        'ai_df',
+        'role_cols',
+        'feature_sets'
+    }
+    assert result['selected_main_setup'] == 'LightGBM winsorized target + top tech flags'
+    assert np.isfinite(result['selected_main_result']['test_metrics']['medae_real'])
+
+
+def test_fit_selected_compensation_model_runs_on_synthetic_data():
+    frame = make_comp_frame()
+    result = compensation_modeling.fit_selected_compensation_model(
+        frame,
+        lgb_params={
+            'n_estimators': 20,
+            'learning_rate': 0.1,
+            'num_leaves': 7,
+            'min_child_samples': 1
+        }
+    )
+
+    assert result['setup'] == 'LightGBM winsorized target + top tech flags'
+    assert result['train_years'] == compensation_modeling.CORE_WINDOW_YEARS
+    assert result['valid_year'] == compensation_modeling.VALID_YEAR
+    assert result['test_year'] == compensation_modeling.TEST_YEAR
+    assert len(result['tech_flag_cols']) > 0
+    assert np.isfinite(result['valid_metrics']['medae_real'])
+    assert np.isfinite(result['test_metrics']['medae_real'])
+
+
+def test_rolling_origin_setup_comparison_runs_on_synthetic_data():
+    frame = make_comp_frame()
+    result = compensation_modeling.rolling_origin_setup_comparison(
+        frame,
+        ridge_alphas=[25.0],
+        lgb_presets={
+            'tiny': {
+                'n_estimators': 20,
+                'learning_rate': 0.1,
+                'num_leaves': 7,
+                'min_child_samples': 1
+            }
+        }
+    )
+
+    summary = result['summary']
+    assert 'Ridge core alpha=25.0' in set(summary['setup'])
+    assert 'LightGBM core + top tech flags [tiny]' in set(summary['setup'])
+    assert np.isfinite(summary['mean_valid_medae_real']).all()
