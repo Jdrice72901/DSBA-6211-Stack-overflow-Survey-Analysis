@@ -34,6 +34,7 @@ DEF_ROLLING_SEED_TEXT = '42'
 DEF_OBJECTIVE_METRIC = 'qwk'
 DEF_SEARCH_SPACE = 'broad'
 DEF_EARLY_STOPPING = 75
+DEF_GPU_BACKEND = 'gpu'
 
 # Extra anchor values for knobs that are not explicitly set in the canonical default params
 ANCHOR_OVERRIDES = {
@@ -257,11 +258,11 @@ def default_anchor_params():
 def resolve_device_params(args):
     params = {}
     if args.use_gpu:
-        params['device_type'] = 'gpu'
+        params['device_type'] = args.gpu_backend
         params['gpu_device_id'] = int(args.gpu_device_id)
-        if args.gpu_platform_id is not None:
+        if args.gpu_backend == 'gpu' and args.gpu_platform_id is not None:
             params['gpu_platform_id'] = int(args.gpu_platform_id)
-        if args.gpu_use_dp:
+        if args.gpu_backend == 'gpu' and args.gpu_use_dp:
             params['gpu_use_dp'] = True
     return params
 
@@ -567,9 +568,10 @@ def parse_args():
     parser.add_argument('--search-space', choices=['focused', 'broad'], default=DEF_SEARCH_SPACE)
     parser.add_argument('--early-stopping-rounds', type=int, default=DEF_EARLY_STOPPING)
     parser.add_argument('--use-gpu', action='store_true', help='Use LightGBM GPU training')
+    parser.add_argument('--gpu-backend', choices=['gpu', 'cuda'], default=DEF_GPU_BACKEND, help='LightGBM GPU backend: OpenCL gpu for wheel installs or cuda for CUDA builds')
     parser.add_argument('--gpu-device-id', type=int, default=0, help='GPU device id passed to LightGBM')
-    parser.add_argument('--gpu-platform-id', type=int, default=None, help='Optional OpenCL platform id for LightGBM GPU')
-    parser.add_argument('--gpu-use-dp', action='store_true', help='Enable double precision on GPU if supported')
+    parser.add_argument('--gpu-platform-id', type=int, default=None, help='Optional OpenCL platform id for the LightGBM gpu backend')
+    parser.add_argument('--gpu-use-dp', action='store_true', help='Enable double precision on the OpenCL gpu backend if supported')
     parser.add_argument('--resume', action='store_true', help='Resume an existing persisted study if present')
     parser.add_argument('--quick', action='store_true', help='Lighter local preset with fewer trials and seeds')
     return parser.parse_args()
@@ -629,6 +631,7 @@ def main():
         )
     log_line(
         f'[setup] device={"gpu" if args.use_gpu else "cpu"} '
+        f'gpu_backend={args.gpu_backend if args.use_gpu else "n/a"} '
         f'gpu_device_id={args.gpu_device_id if args.use_gpu else "n/a"}'
     )
     log_line(f'[setup] storage={storage_uri if storage_uri else "in-memory only"}')
@@ -722,6 +725,7 @@ def main():
         'rolling_seed_list': rolling_seed_list,
         'search_space': args.search_space,
         'device': 'gpu' if args.use_gpu else 'cpu',
+        'gpu_backend': args.gpu_backend if args.use_gpu else None,
         'gpu_device_id': int(args.gpu_device_id) if args.use_gpu else None,
         'persist_study': bool(storage_cfg['persist_study']),
         'storage_path': str(storage_cfg['storage_path']) if storage_cfg['storage_path'] else None,
