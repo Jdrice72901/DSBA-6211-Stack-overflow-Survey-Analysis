@@ -57,4 +57,6 @@ def test_default_anchor_params_match_tunable_keys():
     assert set(anchor) == set(tune_sat_lgb.tune_param_keys())
     assert anchor['n_estimators'] > 0
     assert anchor['num_leaves'] > 0
+    assert anchor['reg_alpha'] > 0
+    assert anchor['reg_lambda'] > 0
     assert anchor['max_bin'] in {63, 127, 255}

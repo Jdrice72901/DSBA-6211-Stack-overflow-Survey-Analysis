@@ -41,6 +41,8 @@ ANCHOR_OVERRIDES = {
     'min_child_weight': 1e-3,
     'subsample_freq': 0,
     'min_split_gain': 0.0,
+    'reg_alpha': 1e-8,
+    'reg_lambda': 1e-8,
     'cat_l2': 10.0,
     'cat_smooth': 10.0,
     'max_cat_to_onehot': 4,
