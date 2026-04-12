@@ -1,3 +1,5 @@
+import argparse
+import sys
 import warnings
 from pathlib import Path
 
@@ -45,9 +47,17 @@ SAT_TEST_YEAR = 2025
 SAT_LABELS = [1, 2, 3, 4, 5]
 SAT_BINARY_THRESHOLD = 4
 
+# Supported validation objectives for setup ranking and optional LightGBM tuning
+SAT_OBJECTIVE_METRICS = ['qwk', 'macro_f1', 'weighted_f1']
+SAT_VALID_METRIC_COLS = {
+    'qwk': 'valid_qwk',
+    'macro_f1': 'valid_macro_f1',
+    'weighted_f1': 'valid_weighted_f1'
+}
+
 # Numeric 0-10 harmonization schemes for the later-wave satisfaction instruments
 SAT_NUMERIC_SCHEMES = {
-    'default': [1, 4, 6, 8],
+    'default': [0, 3, 6, 9],
     'alt_equal_width': [2, 4, 6, 8]
 }
 
@@ -533,6 +543,24 @@ def score_satisfaction(y_true, y_pred, labels=SAT_LABELS):
     return metrics
 
 
+# Keeps objective selection consistent across tuning, ranking, and CLI runs
+def objective_metric_value(metrics, objective_metric='qwk'):
+    if objective_metric not in SAT_OBJECTIVE_METRICS:
+        raise ValueError(f'Unsupported satisfaction objective metric: {objective_metric}')
+
+    return float(metrics[objective_metric])
+
+
+# Picks the primary valid metric first, then falls back to the rest for ties
+def objective_sort_cols(objective_metric='qwk'):
+    if objective_metric not in SAT_VALID_METRIC_COLS:
+        raise ValueError(f'Unsupported satisfaction objective metric: {objective_metric}')
+
+    primary = SAT_VALID_METRIC_COLS[objective_metric]
+    fallback = ['valid_qwk', 'valid_macro_f1', 'valid_weighted_f1']
+    return [primary] + [col for col in fallback if col != primary]
+
+
 def confusion_frame(y_true, y_pred, labels=SAT_LABELS):
     matrix = confusion_matrix(y_true, y_pred, labels=labels)
     return pd.DataFrame(matrix, index=labels, columns=labels)
@@ -792,7 +820,8 @@ def tune_lgbm_multiclass(
     cat_cols,
     num_cols,
     base_params=None,
-    n_trials=20
+    n_trials=20,
+    objective_metric='qwk'
 ):
     resolved = resolve_lgb_params(base_params)
     train_prepped, num_imputer = prepare_lgbm_frame(train_df, cat_cols, num_cols)
@@ -820,7 +849,10 @@ def tune_lgbm_multiclass(
             callbacks=[lgb.early_stopping(50, verbose=False)]
         )
         pred = model.predict(valid_prepped[features], num_iteration=model.best_iteration_)
-        return score_satisfaction(valid_prepped[SAT_TARGET_COL], pred)['qwk']
+        return objective_metric_value(
+            score_satisfaction(valid_prepped[SAT_TARGET_COL], pred),
+            objective_metric=objective_metric
+        )
 
     study = optuna.create_study(direction='maximize')
     study.optimize(objective, n_trials=n_trials)
@@ -837,11 +869,20 @@ def fit_lgbm_multiclass(
     num_cols,
     params=None,
     tune_trials=0,
+    tune_objective_metric='qwk',
     early_stopping_rounds=50
 ):
     resolved = resolve_lgb_params(params)
     if tune_trials:
-        resolved = tune_lgbm_multiclass(train_df, valid_df, cat_cols, num_cols, base_params=resolved, n_trials=tune_trials)
+        resolved = tune_lgbm_multiclass(
+            train_df,
+            valid_df,
+            cat_cols,
+            num_cols,
+            base_params=resolved,
+            n_trials=tune_trials,
+            objective_metric=tune_objective_metric
+        )
 
     train_prepped, num_imputer = prepare_lgbm_frame(train_df, cat_cols, num_cols)
     valid_prepped = transform_lgbm_frame(valid_df, cat_cols, num_cols, num_imputer)
@@ -952,6 +993,7 @@ def result_row(setup, result):
             'setup': setup,
             'valid_qwk': np.nan,
             'valid_macro_f1': np.nan,
+            'valid_weighted_f1': np.nan,
             'test_qwk': np.nan,
             'test_macro_f1': np.nan,
             'test_weighted_f1': np.nan,
@@ -964,6 +1006,7 @@ def result_row(setup, result):
         'setup': setup,
         'valid_qwk': result['valid_metrics']['qwk'],
         'valid_macro_f1': result['valid_metrics']['macro_f1'],
+        'valid_weighted_f1': result['valid_metrics']['weighted_f1'],
         'test_qwk': result['test_metrics']['qwk'],
         'test_macro_f1': result['test_metrics']['macro_f1'],
         'test_weighted_f1': result['test_metrics']['weighted_f1'],
@@ -980,7 +1023,8 @@ def compare_satisfaction_setups(
     drop_2018=False,
     lgb_params=None,
     catboost_params=None,
-    tune_lgb_trials=0
+    tune_lgb_trials=0,
+    objective_metric='qwk'
 ):
     bundle = build_satisfaction_bundle(clean_core, numeric_scheme=numeric_scheme, drop_2018=drop_2018)
     feature_sets = bundle['feature_sets']
@@ -1001,7 +1045,8 @@ def compare_satisfaction_setups(
         feature_sets['core_no_comp_cat'],
         feature_sets['core_no_comp_num'],
         params=lgb_params,
-        tune_trials=tune_lgb_trials
+        tune_trials=tune_lgb_trials,
+        tune_objective_metric=objective_metric
     )
     catboost_core = fit_catboost_multiclass(
         train_df,
@@ -1011,10 +1056,15 @@ def compare_satisfaction_setups(
         feature_sets['core_no_comp_num'],
         params=catboost_params
     )
-    selected_main_setup = pd.DataFrame([
+    main_family_summary = pd.DataFrame([
         result_row('LightGBM core_no_comp', lgb_core),
         result_row('CatBoost core_no_comp', catboost_core)
-    ]).sort_values(['valid_qwk', 'valid_macro_f1'], ascending=False)['setup'].iloc[0]
+    ])
+    selected_main_setup = (
+        main_family_summary
+        .sort_values(objective_sort_cols(objective_metric), ascending=False)['setup']
+        .iloc[0]
+    )
     selected_main_result = {
         'LightGBM core_no_comp': lgb_core,
         'CatBoost core_no_comp': catboost_core
@@ -1077,7 +1127,7 @@ def compare_satisfaction_setups(
         result_row('CatBoost core_no_comp', catboost_core),
         result_row(comp_subset_setup_name, selected_family_comp_subset_no_comp),
         result_row(with_comp_setup_name, selected_family_with_comp)
-    ]).sort_values(['valid_qwk', 'valid_macro_f1'], ascending=False)
+    ]).sort_values(objective_sort_cols(objective_metric), ascending=False)
 
     return {
         'bundle': bundle,
@@ -1096,6 +1146,7 @@ def compare_satisfaction_setups(
         'lgb_with_comp': selected_family_with_comp if selected_family == 'lightgbm' else None,
         'frame_counts': frame.groupby('survey_year').size().rename('rows').reset_index(),
         'with_comp_counts': with_comp_counts,
+        'objective_metric': objective_metric,
         'selected_main_setup': selected_main_setup,
         'selected_main_result': selected_main_result
     }
@@ -1220,16 +1271,38 @@ def harmonization_sensitivity(
 # Main
 # -------------------------------------------------------------------------------------
 
+# CLI args keep the script flexible without hiding the canonical defaults
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Run the canonical satisfaction model comparison'
+    )
+    parser.add_argument('--input-path', default=str(CLEAN_PATH), help='Path to clean_core parquet')
+    parser.add_argument('--objective-metric', choices=SAT_OBJECTIVE_METRICS, default='qwk', help='Validation metric used to rank model families and optional LightGBM tuning')
+    parser.add_argument('--numeric-scheme', choices=list(SAT_NUMERIC_SCHEMES), default='default', help='Numeric job-satisfaction harmonization scheme for 0-10 waves')
+    parser.add_argument('--drop-2018', action='store_true', help='Drop the 2018 wave from the satisfaction frame')
+    parser.add_argument('--tune-lgb-trials', type=int, default=0, help='Optional Optuna trial count for the LightGBM branch')
+    return parser.parse_args()
+
+
 # Runs the canonical satisfaction comparison directly from the cleaned parquet
 def main():
     from src import comp_clean
 
-    clean_core = comp_clean.load_clean_core(CLEAN_PATH)
-    results = compare_satisfaction_setups(clean_core)
+    args = parse_args()
+    clean_core = comp_clean.load_clean_core(Path(args.input_path))
+    results = compare_satisfaction_setups(
+        clean_core,
+        numeric_scheme=args.numeric_scheme,
+        drop_2018=args.drop_2018,
+        tune_lgb_trials=args.tune_lgb_trials,
+        objective_metric=args.objective_metric
+    )
 
     print(results['summary'].to_string(index=False))
+    print(f"Selection objective: {results['objective_metric']}")
     print(f"Selected main setup: {results['selected_main_setup']}")
+    return 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

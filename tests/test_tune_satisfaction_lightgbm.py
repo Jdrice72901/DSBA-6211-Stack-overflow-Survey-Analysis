@@ -11,11 +11,13 @@ def test_parse_seed_text_uses_default_and_parses_values():
 def test_objective_from_summary_supports_all_modes():
     summary = {
         'holdout_qwk_mean': 0.11,
-        'holdout_macro_f1_mean': 0.22
+        'holdout_macro_f1_mean': 0.22,
+        'holdout_weighted_f1_mean': 0.33
     }
 
     assert tune_sat_lgb.objective_from_summary(summary, 'holdout', 'qwk') == 0.11
     assert tune_sat_lgb.objective_from_summary(summary, 'holdout', 'macro_f1') == 0.22
+    assert tune_sat_lgb.objective_from_summary(summary, 'holdout', 'weighted_f1') == 0.33
     assert tune_sat_lgb.objective_from_summary(summary, 'holdout', 'qwk_macro_blend') == 0.1375
 
 

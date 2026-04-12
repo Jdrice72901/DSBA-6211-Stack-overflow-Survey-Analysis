@@ -98,10 +98,12 @@ def summarize_runs(run_df, prefix):
     }
 
 
-# Lets the study optimize QWK, macro F1, or a simple blend without changing the trial code
+# Lets the study optimize QWK, macro F1, weighted F1, or a simple blend without changing the trial code
 def objective_from_summary(summary, prefix, metric_name):
     if metric_name == 'macro_f1':
         return float(summary[f'{prefix}_macro_f1_mean'])
+    if metric_name == 'weighted_f1':
+        return float(summary[f'{prefix}_weighted_f1_mean'])
     if metric_name == 'qwk_macro_blend':
         qwk = float(summary[f'{prefix}_qwk_mean'])
         macro_f1 = float(summary[f'{prefix}_macro_f1_mean'])
@@ -501,11 +503,13 @@ def build_trials_frame(study):
             'holdout_qwk_std': trial.user_attrs.get('holdout_qwk_std'),
             'holdout_macro_f1_mean': trial.user_attrs.get('holdout_macro_f1_mean'),
             'holdout_macro_f1_std': trial.user_attrs.get('holdout_macro_f1_std'),
+            'holdout_weighted_f1_mean': trial.user_attrs.get('holdout_weighted_f1_mean'),
             'holdout_accuracy_mean': trial.user_attrs.get('holdout_accuracy_mean'),
             'holdout_best_iteration_mean': trial.user_attrs.get('holdout_best_iteration_mean'),
             'holdout_best_iteration_median': trial.user_attrs.get('holdout_best_iteration_median'),
             'rolling_qwk_mean': trial.user_attrs.get('rolling_qwk_mean'),
             'rolling_macro_f1_mean': trial.user_attrs.get('rolling_macro_f1_mean'),
+            'rolling_weighted_f1_mean': trial.user_attrs.get('rolling_weighted_f1_mean'),
             'rolling_accuracy_mean': trial.user_attrs.get('rolling_accuracy_mean'),
             **trial.params
         })
@@ -566,7 +570,7 @@ def parse_args():
     parser.add_argument('--rolling-weight', type=float, default=0.0, help='Weight on rolling-origin validation objective')
     parser.add_argument('--rolling-min-train-year', type=int, default=2015, help='First year allowed in rolling-origin training')
     parser.add_argument('--rolling-final-valid-year', type=int, default=2024, help='Last rolling-origin validation year')
-    parser.add_argument('--objective-metric', choices=['qwk', 'macro_f1', 'qwk_macro_blend'], default=DEF_OBJECTIVE_METRIC)
+    parser.add_argument('--objective-metric', choices=['qwk', 'macro_f1', 'weighted_f1', 'qwk_macro_blend'], default=DEF_OBJECTIVE_METRIC)
     parser.add_argument('--search-space', choices=['focused', 'broad'], default=DEF_SEARCH_SPACE)
     parser.add_argument('--early-stopping-rounds', type=int, default=DEF_EARLY_STOPPING)
     parser.add_argument('--use-gpu', action='store_true', help='Use LightGBM GPU training')

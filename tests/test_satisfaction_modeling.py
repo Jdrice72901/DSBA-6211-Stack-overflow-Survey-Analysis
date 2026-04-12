@@ -183,6 +183,7 @@ def test_compare_satisfaction_setups_runs_on_synthetic_data():
     frame = make_sat_frame(rows_per_label=3)
     result = satisfaction_modeling.compare_satisfaction_setups(
         frame,
+        objective_metric='weighted_f1',
         lgb_params={
             'n_estimators': 25,
             'learning_rate': 0.1,
@@ -207,7 +208,9 @@ def test_compare_satisfaction_setups_runs_on_synthetic_data():
         'CatBoost core_no_comp'
     }.issubset(set(summary['setup']))
     assert np.isfinite(summary['valid_qwk']).all()
+    assert np.isfinite(summary['valid_weighted_f1']).all()
     assert np.isfinite(summary['test_qwk']).all()
+    assert result['objective_metric'] == 'weighted_f1'
     assert result['selected_main_setup'] in {'LightGBM core_no_comp', 'CatBoost core_no_comp'}
     assert result['selected_family'] in {'lightgbm', 'catboost'}
     assert result['selected_family_comp_subset_setup'] in set(summary['setup'])
