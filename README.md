@@ -9,6 +9,7 @@ Current workflow:
 - Raw annual CSV extracts live under `data/` and should be treated as immutable source files
 - The main standardized respondent-year table is built by `src/comp_clean.py`
 - The current production derived table covers 2015-2025 and is written to `data/derived/clean_core.parquet`
+- `clean_core.parquet` is intentionally lean for general use whereas model-specific features and flags are surfaced in their respective notebooks or pipeline steps
 - Raw 2011-2014 files are present, but are inventory-only as their questionnaire semantics are different and offer less coverage
 - Compensation modeling currently uses a 2019+ window because compensation fields are more comparable in later years
 - Job satisfaction modeling requires explicit year-specific target standardization as satisfaction questions change across survey years

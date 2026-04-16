@@ -23,6 +23,13 @@ def make_comp_frame():
     languages = ['Python;JavaScript', 'Python;Rust', 'SQL;Go']
     databases = ['PostgreSQL;Redis', 'Redis;MongoDB', 'PostgreSQL;MongoDB']
     platforms = ['AWS;Docker', 'AWS;Azure', 'Azure;GCP']
+    webframes = ['React;Django', 'Vue.js', 'Angular']
+    misc_tech = ['Docker;Kubernetes', 'Docker', 'Kubernetes']
+    learn_code = ['Books;School', 'Books;Courses', 'Documentation;School']
+    learn_code_online = ['Stack Overflow;YouTube', 'YouTube', 'Stack Overflow']
+    coding_activities = ['Professional development;Hobby', 'Professional development', 'Hobby']
+    op_sys_prof = ['Windows;Linux', 'Linux', 'macOS']
+    role_families = ['Full-stack', 'Back-end', 'Data / ML']
 
     for year in range(2019, 2026):
         for idx in range(3):
@@ -31,15 +38,12 @@ def make_comp_frame():
                 'survey_year': year,
                 'country_clean': countries[idx],
                 'region': regions[idx],
-                'is_comp_model_sample': True,
                 'is_professional': True,
+                'is_paid_worker': True,
                 'employment_primary': employment_groups[idx],
-                'employment_group': employment_groups[idx],
                 'is_full_time_employed': idx == 0,
                 'is_part_time_employed': idx == 1,
                 'is_independent': idx == 2,
-                'is_student_status': False,
-                'is_retired_status': False,
                 'education_clean': educations[idx],
                 'org_size_clean': org_sizes[idx],
                 'industry_clean': industries[idx],
@@ -51,24 +55,18 @@ def make_comp_frame():
                 'years_code_pro_clean': str(4 + idx),
                 'work_exp_clean': str(5 + idx),
                 'professional_experience_years': str(4 + idx),
-                'language_count': str(1 + idx),
-                'database_count': str(2 + idx),
-                'platform_count': str(1 + idx),
-                'webframe_count': str(idx),
-                'misc_tech_count': str(idx),
-                'learn_code_count': str(2 + idx),
-                'learn_code_online_count': str(idx),
-                'coding_activities_count': str(1 + idx),
-                'op_sys_prof_count': str(idx),
-                'role_full_stack': str(int(idx == 0)),
-                'role_back_end': str(int(idx == 1)),
-                'role_data_ml': str(int(idx == 2)),
+                'role_family': role_families[idx],
                 'language': languages[idx],
                 'database': databases[idx],
                 'platform': platforms[idx],
+                'webframe': webframes[idx],
+                'misc_tech': misc_tech[idx],
+                'learn_code': learn_code[idx],
+                'learn_code_online': learn_code_online[idx],
+                'coding_activities': coding_activities[idx],
+                'op_sys_prof': op_sys_prof[idx],
                 'comp_usd_clean': str(comp_real),
-                'comp_real_2025': str(comp_real),
-                'log_comp_real_2025': str(np.log(comp_real))
+                'comp_real_2025': str(comp_real)
             })
 
     return pd.DataFrame(rows)
@@ -76,8 +74,8 @@ def make_comp_frame():
 
 def test_coerce_compensation_frame_normalizes_numeric_fields_and_year_string():
     frame = make_comp_frame().iloc[:2].copy()
-    frame['role_full_stack'] = ['1', '0']
-    frame['language_count'] = ['4', 'not a number']
+    frame['role_family'] = ['Full-stack', 'Back-end']
+    frame['language'] = ['Python;JavaScript;Rust;Go', 'not a number']
 
     coerced = compensation_modeling.coerce_compensation_frame(frame)
 
@@ -85,7 +83,8 @@ def test_coerce_compensation_frame_normalizes_numeric_fields_and_year_string():
     assert pd.api.types.is_numeric_dtype(coerced['language_count'])
     assert pd.api.types.is_numeric_dtype(coerced[compensation_modeling.TARGET_COL])
     assert np.isclose(coerced['role_full_stack'].iloc[0], 1.0)
-    assert np.isnan(coerced['language_count'].iloc[1])
+    assert coerced['language_count'].iloc[0] == 4
+    assert coerced['language_count'].iloc[1] == 1
 
 
 def test_add_top_tech_flags_uses_fit_frame_and_fills_expected_columns():

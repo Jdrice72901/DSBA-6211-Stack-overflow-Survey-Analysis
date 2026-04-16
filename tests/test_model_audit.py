@@ -20,34 +20,26 @@ def test_clean_core_parquet_contract():
         'country_clean',
         'region',
         'employment_primary',
+        'is_paid_worker',
+        'is_professional',
         'industry_clean',
         'ic_or_pm_clean',
         'years_code_pro_clean',
         'work_exp_clean',
+        'professional_experience_years',
+        'experience_proxy_source',
+        'role_family',
         'comp',
         'comp_usd_clean',
-        'comp_real_2025',
-        'log_comp_real_2025',
-        'is_comp_analysis_sample',
-        'is_comp_model_core',
-        'is_comp_model_tech_rich',
-        'is_comp_model_ai_era',
-        'is_comp_model_sample'
+        'comp_real_2025'
     }
     assert required_cols.issubset(df.columns)
     assert df['row_id'].is_unique
     assert set(df['survey_year'].dropna().unique()) == set(range(2015, 2026))
 
     assert df['comp_usd_clean'].dropna().between(1000, 1_000_000).all()
-    assert np.allclose(
-        df['log_comp_real_2025'].dropna().to_numpy(),
-        np.log(df.loc[df['log_comp_real_2025'].notna(), 'comp_real_2025']).to_numpy()
-    )
-
-    assert (df['is_comp_model_core'] == (df['is_comp_analysis_sample'] & df['survey_year'].ge(2019))).all()
-    assert (df['is_comp_model_tech_rich'] == (df['is_comp_analysis_sample'] & df['survey_year'].ge(2021))).all()
-    assert (df['is_comp_model_ai_era'] == (df['is_comp_analysis_sample'] & df['survey_year'].ge(2023))).all()
-    assert (df['is_comp_model_sample'] == df['is_comp_model_core']).all()
+    expected_prof_exp = df['years_code_pro_clean'].combine_first(df['work_exp_clean'])
+    assert expected_prof_exp.fillna(-1).equals(df['professional_experience_years'].fillna(-1))
     assert df.loc[df['country_clean'].isna(), 'region'].isna().all()
 
 
@@ -60,7 +52,13 @@ def test_build_clean_core_single_year_smoke(monkeypatch):
     assert clean['row_id'].is_unique
     assert clean.shape[0] > 0
     assert clean['comp_usd_clean'].dropna().between(1000, 1_000_000).all()
-    assert (clean['is_comp_model_sample'] == clean['is_comp_analysis_sample']).all()
+    expected_mask = comp_clean.comp_model_mask(clean)
+    assert expected_mask.equals(
+        clean['survey_year'].ge(2019)
+        & clean['is_professional'].fillna(False)
+        & clean['comp_usd_clean'].notna()
+        & clean['is_paid_worker'].fillna(False)
+    )
     assert clean['country_clean'].notna().any()
     assert clean['region'].notna().any()
     assert clean['employment_primary'].notna().any()
@@ -135,7 +133,7 @@ def test_build_job_sat_model_frame_filters_to_supported_years_and_employment():
         'is_full_time_employed': [True, True, False, False],
         'is_part_time_employed': [False, False, False, False],
         'is_independent': [False, False, False, True],
-        'employment_group': [
+        'employment_primary': [
             'Employed full-time',
             'Employed full-time',
             'Student',
@@ -157,7 +155,7 @@ def test_build_job_sat_model_frame_uses_paid_work_flags_for_mixed_status_rows():
         'is_full_time_employed': [False, False],
         'is_part_time_employed': [True, False],
         'is_independent': [False, False],
-        'employment_group': ['Student', 'Student']
+        'employment_primary': ['Student', 'Student']
     })
 
     frame = model_audit.build_job_sat_model_frame(clean)

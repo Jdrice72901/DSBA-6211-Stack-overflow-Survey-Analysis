@@ -11,7 +11,7 @@ from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from src import model_audit
+from src import comp_clean, model_audit
 
 # -------------------------------------------------------------------------------------
 # Setup
@@ -94,23 +94,10 @@ SELECTED_LGB_PRESET = 'tuned'
 NUMERIC_FIELDS = [
     'survey_year',
     'age_mid',
-    'years_code_pro_clean',
-    'work_exp_clean',
     'professional_experience_years',
     'language_count',
     'database_count',
     'platform_count',
-    'webframe_count',
-    'misc_tech_count',
-    'learn_code_count',
-    'learn_code_online_count',
-    'coding_activities_count',
-    'op_sys_prof_count',
-    'is_full_time_employed',
-    'is_part_time_employed',
-    'is_independent',
-    'is_student_status',
-    'is_retired_status',
     'comp_usd_clean',
     TARGET_COL,
     REAL_TARGET_COL,
@@ -123,6 +110,29 @@ NUMERIC_FIELDS = [
 # Frame prep
 # -------------------------------------------------------------------------------------
 
+def add_compensation_derived_fields(frame):
+    out = frame.copy()
+    if 'role_family' not in out.columns and 'dev_type' in out.columns:
+        out['role_family'] = out['dev_type'].map(comp_clean.build_role_family_value)
+    out = comp_clean.add_multiselect_counts(
+        out,
+        fields=[
+            'language',
+            'database',
+            'platform',
+            'webframe',
+            'misc_tech',
+            'learn_code',
+            'learn_code_online',
+            'coding_activities',
+            'op_sys_prof'
+        ]
+    )
+    out = comp_clean.add_role_family_features(out, add_flags=True, add_count=False)
+    out = comp_clean.add_log_comp_real(out)
+    return out
+
+
 # Coerces the core numeric fields so downstream models don't trip over mixed dtypes
 def coerce_numeric_fields(frame, fields=None):
     out = frame.copy()
@@ -132,7 +142,7 @@ def coerce_numeric_fields(frame, fields=None):
         if field in out.columns:
             out[field] = pd.to_numeric(out[field], errors='coerce')
 
-    role_cols = [col for col in out.columns if col.startswith('role_')]
+    role_cols = [col for col in out.columns if col.startswith('role_') and col != 'role_family']
     for field in role_cols:
         out[field] = pd.to_numeric(out[field], errors='coerce')
 
@@ -148,8 +158,9 @@ def add_survey_year_str(frame):
 
 # Gets the compensation frame into one consistent modeling-friendly shape
 def coerce_compensation_frame(clean_core):
-    frame = add_survey_year_str(clean_core)
-    numeric_fields = NUMERIC_FIELDS + [col for col in frame.columns if col.startswith('role_')]
+    frame = add_compensation_derived_fields(clean_core)
+    frame = add_survey_year_str(frame)
+    numeric_fields = NUMERIC_FIELDS + [col for col in frame.columns if col.startswith('role_') and col != 'role_family']
     frame = coerce_numeric_fields(frame, numeric_fields)
 
     if 'survey_year_str' in frame.columns:
@@ -166,7 +177,7 @@ def coerce_compensation_frame(clean_core):
 def get_comp_frames(clean_core):
     base = coerce_compensation_frame(clean_core)
     base = base.loc[
-        base['is_comp_model_sample']
+        comp_clean.comp_model_mask(base)
         & base['country_clean'].notna()
         & base['region'].notna()
     ].copy()
@@ -185,7 +196,7 @@ def prepare_compensation_frame(clean_core):
 
 # Pulls every role flag so the feature spec can stay readable elsewhere
 def get_role_cols(frame):
-    return sorted(col for col in frame.columns if col.startswith('role_'))
+    return sorted(col for col in frame.columns if col.startswith('role_') and col != 'role_family')
 
 
 # Defines the core and later-wave feature sets in one auditable place

@@ -19,7 +19,7 @@ from sklearn.metrics import (
 )
 from statsmodels.miscmodels.ordinal_model import OrderedModel
 
-from src import model_audit
+from src import comp_clean, model_audit
 
 # -------------------------------------------------------------------------------------
 # Setup
@@ -228,6 +228,30 @@ def add_career_stage_features(frame):
     return out
 
 
+def add_age_group(frame):
+    out = frame.copy()
+    age_mid = pd.to_numeric(out.get('age_mid', pd.Series(pd.NA, index=out.index)), errors='coerce')
+    out['age_mid'] = age_mid
+    out['age_group'] = pd.cut(
+        age_mid,
+        bins=[10, 25, 35, 45, 55, 100],
+        labels=['Under 25', '25-34', '35-44', '45-54', '55+'],
+        right=False
+    )
+    return out
+
+
+def add_satisfaction_derived_features(frame):
+    out = add_career_stage_features(frame)
+    out = add_age_group(out)
+    if 'role_family' not in out.columns and 'dev_type' in out.columns:
+        out['role_family'] = out['dev_type'].map(comp_clean.build_role_family_value)
+    out = comp_clean.add_multiselect_counts(out, fields=['language', 'database', 'platform'])
+    out = comp_clean.add_role_family_features(out)
+    out = comp_clean.add_log_comp_real(out)
+    return out
+
+
 # Main builder for the employed-professional respondent-year modeling frame
 def build_satisfaction_frame(
     clean_core,
@@ -241,7 +265,7 @@ def build_satisfaction_frame(
 ):
     include_years = SAT_CANONICAL_YEARS if include_years is None else include_years
     frame = add_job_sat_std(clean_core, numeric_scheme=numeric_scheme)
-    frame = add_career_stage_features(frame)
+    frame = add_satisfaction_derived_features(frame)
     frame = frame.loc[frame['survey_year'].isin(include_years)].copy()
     if drop_2018:
         frame = frame.loc[frame['survey_year'].ne(2018)].copy()

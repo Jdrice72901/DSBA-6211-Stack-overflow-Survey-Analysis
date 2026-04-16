@@ -42,7 +42,7 @@ def paid_work_mask(frame):
     if set(flag_cols).issubset(frame.columns):
         return frame[flag_cols].fillna(False).astype(bool).any(axis=1)
 
-    return frame['employment_group'].isin([
+    return frame['employment_primary'].isin([
         'Employed full-time',
         'Employed part-time',
         'Independent / contract'
@@ -183,6 +183,7 @@ def main():
 
     clean_core = comp_clean.load_clean_core(CLEAN_PATH)
     sat_frame = build_job_sat_model_frame(clean_core)
+    comp_mask = comp_clean.comp_model_mask(clean_core)
 
     summary = pd.DataFrame([
         {
@@ -192,8 +193,8 @@ def main():
         },
         {
             'artifact': 'comp_model_sample',
-            'rows': int(clean_core['is_comp_model_sample'].fillna(False).sum()),
-            'survey_years': clean_core.loc[clean_core['is_comp_model_sample'].fillna(False), 'survey_year'].nunique()
+            'rows': int(comp_mask.sum()),
+            'survey_years': clean_core.loc[comp_mask, 'survey_year'].nunique()
         },
         {
             'artifact': 'job_sat_model_frame',

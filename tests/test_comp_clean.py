@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import pandas as pd
 
 from src import comp_clean
@@ -94,3 +95,20 @@ def test_role_family_maps_common_job_titles():
     assert comp_clean.role_family('QA tester') == 'QA / Testing'
     assert comp_clean.role_family('Student') == 'Student / Academic'
     assert comp_clean.role_family('Something else entirely') == 'Other'
+
+
+def test_build_role_family_value_dedupes_and_preserves_role_order():
+    value = 'Full-stack developer;Back-end engineer;Full-stack developer;QA tester'
+
+    assert comp_clean.build_role_family_value(value) == 'Full-stack;Back-end;QA / Testing'
+
+
+def test_add_role_family_features_expands_flags_from_compact_role_field():
+    frame = pd.DataFrame({'role_family': ['Full-stack;Back-end', pd.NA]})
+
+    out = comp_clean.add_role_family_features(frame)
+
+    assert out['role_family_count'].iloc[0] == 2.0
+    assert np.isnan(out['role_family_count'].iloc[1])
+    assert out['role_full_stack'].tolist() == [1, 0]
+    assert out['role_back_end'].tolist() == [1, 0]

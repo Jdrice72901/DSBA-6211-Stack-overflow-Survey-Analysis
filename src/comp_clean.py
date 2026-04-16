@@ -1201,6 +1201,43 @@ def multi_count(series):
     return counts.where(series.notna(), np.nan)
 
 
+MULTI_COUNT_MAP = {
+    'language': 'language_count',
+    'database': 'database_count',
+    'platform': 'platform_count',
+    'webframe': 'webframe_count',
+    'misc_tech': 'misc_tech_count',
+    'learn_code': 'learn_code_count',
+    'learn_code_online': 'learn_code_online_count',
+    'coding_activities': 'coding_activities_count',
+    'op_sys_prof': 'op_sys_prof_count'
+}
+
+ROLE_FAMILY_LEVELS = [
+    'Advocacy / DX',
+    'Architecture',
+    'Back-end',
+    'Data / ML',
+    'Design / UX',
+    'Desktop / Enterprise',
+    'DevOps / Cloud',
+    'Embedded / hardware',
+    'Front-end',
+    'Full-stack',
+    'Game / graphics',
+    'Management',
+    'Mobile',
+    'Other',
+    'QA / Testing',
+    'Security',
+    'Student / Academic'
+]
+ROLE_FAMILY_COLS = {
+    level: 'role_' + re.sub(r'[^a-z0-9]+', '_', level.lower()).strip('_')
+    for level in ROLE_FAMILY_LEVELS
+}
+
+
 # Creates potential role groups for the various responses across the dataset
 def role_family(token):
     if pd.isna(token):
@@ -1241,6 +1278,73 @@ def role_family(token):
     if 'qa' in text or 'quality assurance' in text or 'test' in text:
         return 'QA / Testing'
     return 'Other'
+
+
+def build_role_family_value(value):
+    if pd.isna(value):
+        return pd.NA
+
+    tokens = []
+    seen = set()
+    for token in str(value).split(';'):
+        token = token.strip()
+        if not token:
+            continue
+        family = role_family(token)
+        if pd.isna(family) or family in seen:
+            continue
+        seen.add(family)
+        tokens.append(family)
+
+    return ';'.join(tokens) if tokens else pd.NA
+
+
+def add_role_family_features(frame, source_col='role_family', add_flags=True, add_count=True):
+    out = frame.copy()
+    source = out.get(source_col, pd.Series(pd.NA, index=out.index))
+    normalized = ';' + source.fillna('').astype(str).str.replace(r'\s*;\s*', ';', regex=True).str.strip('; ') + ';'
+
+    if add_count:
+        out['role_family_count'] = multi_count(source)
+
+    if add_flags:
+        for level, col in ROLE_FAMILY_COLS.items():
+            out[col] = normalized.str.contains(f';{level};', regex=False, na=False).astype(int)
+
+    return out
+
+
+def add_multiselect_counts(frame, fields=None):
+    out = frame.copy()
+    fields = list(MULTI_COUNT_MAP) if fields is None else fields
+
+    for field in fields:
+        if field in out.columns and field in MULTI_COUNT_MAP:
+            out[MULTI_COUNT_MAP[field]] = multi_count(out[field])
+
+    return out
+
+
+def add_log_comp_real(frame, source_col='comp_real_2025', target_col='log_comp_real_2025'):
+    out = frame.copy()
+    if source_col not in out.columns:
+        out[target_col] = np.nan
+        return out
+    values = pd.to_numeric(out[source_col], errors='coerce')
+    out[target_col] = np.where(values.notna(), np.log(values), np.nan)
+    return out
+
+
+def comp_analysis_mask(frame):
+    return (
+        frame['is_professional'].fillna(False).astype(bool)
+        & frame['comp_usd_clean'].notna()
+        & frame['is_paid_worker'].fillna(False).astype(bool)
+    )
+
+
+def comp_model_mask(frame, min_year=2019):
+    return comp_analysis_mask(frame) & frame['survey_year'].ge(min_year)
 
 
 # -------------------------------------------------------------------------------------
@@ -1363,6 +1467,7 @@ def audit_unmapped_countries(clean_core, sample_col=None):
 def audit_comp_outliers(clean_core):
     parsed = clean_core['comp'].map(parse_midpoint)
     frame = clean_core.assign(comp_parsed=parsed)
+    core_mask = comp_model_mask(clean_core, min_year=2019)
     return (
         frame
         .groupby('survey_year')
@@ -1372,7 +1477,7 @@ def audit_comp_outliers(clean_core):
             comp_above_cap=('comp_parsed', lambda series: int(series.gt(1_000_000).sum())),
             comp_exact_cap=('comp_parsed', lambda series: int(series.eq(1_000_000).sum())),
             comp_clean_non_null=('comp_usd_clean', lambda series: int(series.notna().sum())),
-            comp_model_rows=('is_comp_model_sample', lambda series: int(series.sum()))
+            comp_model_rows=('survey_year', lambda series: int(core_mask.loc[series.index].sum()))
         )
         .reset_index()
     )
@@ -1400,18 +1505,17 @@ def validate_clean_core(clean_core=None):
         'country_clean',
         'region',
         'employment_primary',
+        'is_paid_worker',
+        'is_professional',
         'industry_clean',
         'ic_or_pm_clean',
         'years_code_pro_clean',
         'work_exp_clean',
+        'professional_experience_years',
+        'experience_proxy_source',
+        'role_family',
         'comp_usd_clean',
-        'log_comp_real_2025',
-        'comp_real_2025',
-        'is_comp_analysis_sample',
-        'is_comp_model_core',
-        'is_comp_model_tech_rich',
-        'is_comp_model_ai_era',
-        'is_comp_model_sample'
+        'comp_real_2025'
     }
     missing = sorted(required - set(clean_core.columns))
     if missing:
@@ -1436,11 +1540,11 @@ def validate_clean_core(clean_core=None):
     if not clean_core['comp_usd_clean'].dropna().between(1_000, 1_000_000).all():
         errors.append('comp_usd_clean must be between 1,000 and 1,000,000 when present')
 
-    log_rows = clean_core['log_comp_real_2025'].notna()
-    if log_rows.any():
-        expected_log = np.log(clean_core.loc[log_rows, 'comp_real_2025'])
-        if not np.allclose(clean_core.loc[log_rows, 'log_comp_real_2025'], expected_log):
-            errors.append('log_comp_real_2025 must equal log(comp_real_2025)')
+    real_rows = clean_core['comp_real_2025'].notna()
+    if real_rows.any():
+        expected_real = clean_core.loc[real_rows, 'comp_usd_clean'] * CPI_U[2025] / clean_core.loc[real_rows, 'survey_year'].map(CPI_U)
+        if not np.allclose(clean_core.loc[real_rows, 'comp_real_2025'], expected_real):
+            errors.append('comp_real_2025 must equal comp_usd_clean adjusted to 2025 CPI-U dollars')
 
     if not clean_core.loc[clean_core['country_clean'].isna(), 'region'].isna().all():
         errors.append('region should be missing when country_clean is missing')
@@ -1479,14 +1583,24 @@ def validate_clean_core(clean_core=None):
         extra = ', '.join(sorted(ic_or_pm_values - ic_or_pm_allowed))
         errors.append(f"Unexpected ic_or_pm_clean values: {extra}")
 
-    if not (clean_core['is_comp_model_core'] == (clean_core['is_comp_analysis_sample'] & clean_core['survey_year'].ge(2019))).all():
-        errors.append('is_comp_model_core must match 2019+ compensation analysis sample')
-    if not (clean_core['is_comp_model_tech_rich'] == (clean_core['is_comp_analysis_sample'] & clean_core['survey_year'].ge(2021))).all():
-        errors.append('is_comp_model_tech_rich must match 2021+ compensation analysis sample')
-    if not (clean_core['is_comp_model_ai_era'] == (clean_core['is_comp_analysis_sample'] & clean_core['survey_year'].ge(2023))).all():
-        errors.append('is_comp_model_ai_era must match 2023+ compensation analysis sample')
-    if not (clean_core['is_comp_model_sample'] == clean_core['is_comp_model_core']).all():
-        errors.append('is_comp_model_sample must currently alias is_comp_model_core')
+    expected_prof_exp = clean_core['years_code_pro_clean'].combine_first(clean_core['work_exp_clean'])
+    if not expected_prof_exp.fillna(-1).equals(clean_core['professional_experience_years'].fillna(-1)):
+        errors.append('professional_experience_years must combine years_code_pro_clean then work_exp_clean')
+
+    expected_source = np.select(
+        [
+            clean_core['years_code_pro_clean'].notna(),
+            clean_core['work_exp_clean'].notna()
+        ],
+        [
+            'years_code_pro',
+            'work_exp'
+        ],
+        default=pd.NA
+    )
+    expected_source = pd.Series(expected_source, index=clean_core.index, dtype='object')
+    if not expected_source.fillna('missing').equals(clean_core['experience_proxy_source'].astype('object').fillna('missing')):
+        errors.append('experience_proxy_source must match the source used for professional_experience_years')
 
     if errors:
         raise ValueError('\n'.join(errors))
@@ -1561,9 +1675,7 @@ def build_clean_core():
         clean['employment'].notna() | clean['student'].notna() | clean['employment_addl'].notna(),
         pd.NA
     )
-    clean['employment_group'] = clean['employment_primary']
     clean['is_paid_worker'] = clean['is_full_time_employed'] | clean['is_part_time_employed'] | clean['is_independent']
-    clean['is_employed'] = clean['is_paid_worker']
 
     # Explicitly sets if someone works in the field professionally
     branch_prof = (
@@ -1622,7 +1734,6 @@ def build_clean_core():
         & clean['years_code_clean'].notna(),
         'years_code_pro_clean'
     ] = np.nan
-    clean['experience_proxy_years'] = clean['years_code_pro_clean'].combine_first(clean['work_exp_clean'])
     clean['experience_proxy_source'] = np.select(
         [
             clean['years_code_pro_clean'].notna(),
@@ -1634,73 +1745,17 @@ def build_clean_core():
         ],
         default=pd.NA
     )
-    clean['professional_experience_years'] = clean['experience_proxy_years']
+    clean['professional_experience_years'] = clean['years_code_pro_clean'].combine_first(clean['work_exp_clean'])
     clean['comp_usd_clean'] = clean['comp_usd'].where(clean['comp_usd'].between(1000, 1_000_000))
-    clean['log_comp_usd_clean'] = np.log(clean['comp_usd_clean'])
-    clean['age_group'] = pd.cut(
-        clean['age_mid'],
-        bins=[10, 25, 35, 45, 55, 100],
-        labels=['Under 25', '25-34', '35-44', '45-54', '55+'],
-        right=False
-    )
 
     # Gets counts of levels for fields that have varied potential responses
     clean['language_count'] = multi_count(clean['language'])
     clean['database_count'] = multi_count(clean['database'])
     clean['platform_count'] = multi_count(clean['platform'])
-    clean['webframe_count'] = multi_count(clean['webframe'])
-    clean['misc_tech_count'] = multi_count(clean['misc_tech'])
-    clean['learn_code_count'] = multi_count(clean['learn_code'])
-    clean['learn_code_online_count'] = multi_count(clean['learn_code_online'])
-    clean['coding_activities_count'] = multi_count(clean['coding_activities'])
-    clean['op_sys_prof_count'] = multi_count(clean['op_sys_prof'])
 
     # Uses the Consumer Price Index to adjust compensation to all be level with 2025 inflation
-    clean['cpi_u'] = clean['survey_year'].map(CPI_U)
-    clean['comp_real_2025'] = clean['comp_usd_clean'] * CPI_U[2025] / clean['cpi_u']
-    clean['log_comp_real_2025'] = np.log(clean['comp_real_2025'])
-
-    # Defines responses likely to have usable compensation values
-    clean['is_comp_analysis_sample'] = (
-        clean['is_professional']
-        & clean['comp_usd_clean'].notna()
-        & clean['is_paid_worker']
-    )
-
-    # Defines model windows
-    clean['is_comp_model_core'] = (clean['survey_year'] >= 2019) & clean['is_comp_analysis_sample']
-    clean['is_comp_model_tech_rich'] = (clean['survey_year'] >= 2021) & clean['is_comp_analysis_sample']
-    clean['is_comp_model_ai_era'] = (clean['survey_year'] >= 2023) & clean['is_comp_analysis_sample']
-    clean['is_comp_model_extended'] = clean['is_comp_model_tech_rich']
-    clean['is_comp_model_sample'] = clean['is_comp_model_core']
-
-    # Takes the dev types and assigns them the role families we created
-    roles_long = clean.loc[clean['dev_type'].notna(), ['row_id', 'dev_type']].copy()
-    roles_long['dev_type'] = roles_long['dev_type'].astype(str).str.split(';')
-    roles_long = roles_long.explode('dev_type')
-    roles_long['dev_type'] = roles_long['dev_type'].str.strip()
-    roles_long = roles_long.loc[roles_long['dev_type'].ne('')].copy()
-    roles_long = roles_long.reset_index(drop=True)
-    roles_long['role_family'] = roles_long['dev_type'].map(role_family)
-
-    # Assigns given role family back to unique responses and standardizes their names
-    role_flags = pd.crosstab(
-        roles_long['row_id'].to_numpy(),
-        roles_long['role_family'].to_numpy()
-    ).clip(upper=1)
-    role_flags.index.name = 'row_id'
-    role_flags.columns = [
-        'role_' + re.sub(r'[^a-z0-9]+', '_', col.lower()).strip('_')
-        for col in role_flags.columns
-    ]
-
-    # Adds the assigned roles to the main DataFrame and gets their counts for later share calcs
-    clean = clean.drop(columns=[col for col in clean.columns if col.startswith('role_')], errors='ignore')
-    clean = clean.drop(columns=['role_family_count'], errors='ignore')
-    clean = clean.merge(role_flags.reset_index(), on='row_id', how='left')
-    role_cols = sorted([col for col in clean.columns if col.startswith('role_')])
-    clean[role_cols] = clean[role_cols].fillna(0).astype(int)
-    clean['role_family_count'] = clean[role_cols].sum(axis=1)
+    clean['comp_real_2025'] = clean['comp_usd_clean'] * CPI_U[2025] / clean['survey_year'].map(CPI_U)
+    clean['role_family'] = clean['dev_type'].map(build_role_family_value)
 
     # All of the columns that we want to keep for analysis
     clean_cols = [
@@ -1712,7 +1767,6 @@ def build_clean_core():
         'region',
         'age',
         'age_mid',
-        'age_group',
         'gender',
         'ethnicity',
         'main_branch',
@@ -1720,15 +1774,10 @@ def build_clean_core():
         'employment',
         'employment_addl',
         'employment_primary',
-        'employment_group',
-        'is_employed',
         'is_paid_worker',
         'is_full_time_employed',
         'is_part_time_employed',
         'is_independent',
-        'is_student_status',
-        'is_retired_status',
-        'is_not_employed',
         'is_professional',
         'education',
         'education_clean',
@@ -1756,43 +1805,25 @@ def build_clean_core():
         'webframe',
         'misc_tech',
         'op_sys_prof',
-        'current_tech',
         'ai_use',
         'ai_sent',
         'language_count',
         'database_count',
         'platform_count',
-        'webframe_count',
-        'misc_tech_count',
-        'learn_code_count',
-        'learn_code_online_count',
-        'coding_activities_count',
-        'op_sys_prof_count',
         'years_code',
         'years_code_clean',
         'years_code_pro',
         'years_code_pro_clean',
         'work_exp',
         'work_exp_clean',
-        'experience_proxy_years',
         'experience_proxy_source',
         'professional_experience_years',
+        'role_family',
         'job_sat',
-        'job_sat_num',
         'comp',
         'comp_usd_clean',
-        'log_comp_usd_clean',
-        'cpi_u',
-        'comp_real_2025',
-        'log_comp_real_2025',
-        'is_comp_analysis_sample',
-        'is_comp_model_core',
-        'is_comp_model_tech_rich',
-        'is_comp_model_ai_era',
-        'is_comp_model_extended',
-        'is_comp_model_sample',
-        'role_family_count'
-    ] + role_cols
+        'comp_real_2025'
+    ]
     clean_core = clean[clean_cols].copy()
 
     text_cols = clean_core.select_dtypes(include=['object', 'string']).columns

@@ -43,7 +43,6 @@ def make_sat_frame(rows_per_label=4):
     years = satisfaction_modeling.SAT_CANONICAL_YEARS
     countries = ['United States', 'Germany', 'India', 'Canada', 'Brazil']
     regions = ['Americas', 'Europe', 'Asia', 'Americas', 'Americas']
-    age_groups = ['18-24', '25-34', '35-44', '45-54', '55-64']
     educations = [
         "Bachelor's degree",
         "Master's degree",
@@ -53,6 +52,10 @@ def make_sat_frame(rows_per_label=4):
     ]
     org_sizes = ['1-19', '20-99', '100-999', '1,000-4,999', '10,000 or more']
     remote_groups = ['Mostly in-person', 'Hybrid', 'Mostly remote', 'Hybrid', 'Mostly remote']
+    languages = ['Python;JavaScript', 'Python;Rust', 'SQL;Go', 'TypeScript;Python', 'Java;SQL']
+    databases = ['PostgreSQL;Redis', 'Redis;MongoDB', 'MongoDB;PostgreSQL', 'MySQL;Redis', 'PostgreSQL']
+    platforms = ['AWS;Docker', 'AWS;Azure', 'Azure;GCP', 'Docker', 'AWS;GCP']
+    role_families = ['Front-end', 'Back-end', 'Data / ML', 'Full-stack', 'Management']
 
     for year in years:
         for label in satisfaction_modeling.SAT_LABELS:
@@ -66,22 +69,19 @@ def make_sat_frame(rows_per_label=4):
                     'is_part_time_employed': False,
                     'is_independent': False,
                     'employment_primary': 'Employed full-time',
-                    'employment_group': 'Employed full-time',
                     'country_clean': countries[idx],
                     'region': regions[idx],
-                    'age_group': age_groups[label - 1],
+                    'age_mid': 22 + label * 6 + rep,
                     'education_clean': educations[idx],
                     'org_size_clean': org_sizes[idx],
                     'remote_group': remote_groups[idx],
                     'years_code_clean': 2 * label + rep,
-                    'language_count': label + rep % 2,
-                    'database_count': label,
-                    'platform_count': max(1, label - 1),
-                    'role_family_count': 1 + (label % 3),
-                    'role_front_end': int(label <= 2),
-                    'role_back_end': int(label in {3, 4}),
-                    'role_data_ml': int(label == 5),
-                    'log_comp_real_2025': np.log(45_000 + label * 7_500 + rep * 500)
+                    'professional_experience_years': label + rep,
+                    'language': languages[idx],
+                    'database': databases[idx],
+                    'platform': platforms[idx],
+                    'role_family': role_families[idx],
+                    'comp_real_2025': 45_000 + label * 7_500 + rep * 500
                 })
 
     return pd.DataFrame(rows)
@@ -117,8 +117,7 @@ def test_build_satisfaction_frame_filters_supported_years_and_adds_metadata():
         'is_full_time_employed': [False, True, True, False, False],
         'is_part_time_employed': [False, False, False, False, False],
         'is_independent': [False, False, False, False, True],
-        'employment_primary': ['Student', 'Employed full-time', 'Employed full-time', 'Student', 'Independent / contract'],
-        'employment_group': ['Student', 'Employed full-time', 'Employed full-time', 'Student', 'Independent / contract']
+        'employment_primary': ['Student', 'Employed full-time', 'Employed full-time', 'Student', 'Independent / contract']
     })
 
     frame = satisfaction_modeling.build_satisfaction_frame(clean)
