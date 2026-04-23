@@ -1,0 +1,56 @@
+{
+  "objective": "Report the locked compensation model with reproducible visuals and tables",
+  "unit_of_analysis": "respondent-year",
+  "task_type": "predictive compensation regression",
+  "selected_setup": "LightGBM winsorized target + top tech flags",
+  "train_years": [
+    2019,
+    2020,
+    2021,
+    2022,
+    2023
+  ],
+  "valid_year": 2024,
+  "test_year": 2025,
+  "rows": {
+    "train": 199115,
+    "valid": 21001,
+    "test": 20030
+  },
+  "selected_metrics": {
+    "valid_medae_real": 14764.283227124215,
+    "test_medae_real": 17830.99701697996,
+    "test_rmse_real": 62955.14933621221,
+    "test_r2_log": 0.566826247610939
+  },
+  "artifacts": {
+    "figures": {
+      "context": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_context.png",
+      "setup_compare": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_setup_compare.png",
+      "winsor_vs_plain": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_winsor_vs_plain_by_decile.png",
+      "test_diag": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_test_diagnostics.png",
+      "subgroup_error": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_subgroup_error.png",
+      "geo_alignment": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_geography_alignment.png",
+      "shap_bar": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_shap_bar.png",
+      "shap_beeswarm": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_shap_beeswarm.png",
+      "shap_family": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_shap_family.png",
+      "rolling_origin": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_rolling_origin.png"
+    },
+    "tables": {
+      "setup_summary": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_setup_summary.csv",
+      "split_counts": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_split_counts.csv",
+      "region_metrics": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_test_region_metrics.csv",
+      "country_metrics": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_test_country_metrics.csv",
+      "decile_compare": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_test_decile_compare.csv",
+      "feature_importance": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_feature_importance.csv",
+      "shap_top_features": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_shap_top_features.csv",
+      "shap_family": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting\\comp_shap_family_importance.csv"
+    }
+  },
+  "notes": [
+    "Compensation is modeled in log 2025 USD and scored back in real dollars",
+    "The selected model is the winsorized-target LightGBM with train-fit top tech flags",
+    "Geography remains the dominant source of signal and the largest source of subgroup error differences",
+    "The survey is repeated cross-sectional and not a longitudinal panel"
+  ]
+}

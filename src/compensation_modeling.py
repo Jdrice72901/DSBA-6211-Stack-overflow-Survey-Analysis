@@ -1,9 +1,15 @@
+import argparse
+import json
 from pathlib import Path
 
 import lightgbm as lgb
+import matplotlib.pyplot as plt
 import numpy as np
 import optuna
 import pandas as pd
+import seaborn as sns
+import shap
+from matplotlib.ticker import FuncFormatter
 from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
@@ -20,6 +26,8 @@ from src import comp_clean, model_audit
 # Shared path to the canonical cleaned respondent-year table
 ROOT = Path(__file__).resolve().parents[1]
 CLEAN_PATH = ROOT / 'data' / 'derived' / 'clean_core.parquet'
+OUTPUT_ROOT = ROOT / 'data' / 'outputs'
+REPORT_DIR = OUTPUT_ROOT / 'compensation_reporting'
 
 # Core random seed and target columns used throughout the compensation workflow
 RANDOM_STATE = 42
@@ -41,6 +49,11 @@ TOP_N_TECH = {
     'database': 10,
     'platform': 10
 }
+
+# Default reporting controls for the locked compensation model visuals
+REPORT_SHAP_SAMPLE = 2000
+REPORT_COUNTRY_LABELS = 12
+REPORT_SCATTER_SAMPLE = 8000
 
 # Geography groups for the plain-English median baseline
 BASELINE_GROUP_SETS = [
@@ -129,8 +142,7 @@ def add_compensation_derived_fields(frame):
         ]
     )
     out = comp_clean.add_role_family_features(out, add_flags=True, add_count=False)
-    out = comp_clean.add_log_comp_real(out)
-    return out
+    return comp_clean.add_log_comp_real(out)
 
 
 # Coerces the core numeric fields so downstream models don't trip over mixed dtypes
@@ -1119,14 +1131,776 @@ def rolling_origin_setup_comparison(
 
 
 # -------------------------------------------------------------------------------------
+# Reporting
+# -------------------------------------------------------------------------------------
+
+# Keeps saved reporting artifacts in one stable directory with predictable file names
+def build_report_paths(output_dir=REPORT_DIR):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        'output_dir': output_dir,
+        'figures': {
+            'context': output_dir / 'comp_context.png',
+            'setup_compare': output_dir / 'comp_setup_compare.png',
+            'winsor_vs_plain': output_dir / 'comp_winsor_vs_plain_by_decile.png',
+            'test_diag': output_dir / 'comp_test_diagnostics.png',
+            'subgroup_error': output_dir / 'comp_subgroup_error.png',
+            'geo_alignment': output_dir / 'comp_geography_alignment.png',
+            'shap_bar': output_dir / 'comp_shap_bar.png',
+            'shap_beeswarm': output_dir / 'comp_shap_beeswarm.png',
+            'shap_family': output_dir / 'comp_shap_family.png',
+            'rolling_origin': output_dir / 'comp_rolling_origin.png'
+        },
+        'tables': {
+            'setup_summary': output_dir / 'comp_setup_summary.csv',
+            'split_counts': output_dir / 'comp_split_counts.csv',
+            'region_metrics': output_dir / 'comp_test_region_metrics.csv',
+            'country_metrics': output_dir / 'comp_test_country_metrics.csv',
+            'decile_compare': output_dir / 'comp_test_decile_compare.csv',
+            'feature_importance': output_dir / 'comp_feature_importance.csv',
+            'shap_top_features': output_dir / 'comp_shap_top_features.csv',
+            'shap_family': output_dir / 'comp_shap_family_importance.csv'
+        },
+        'manifest': output_dir / 'comp_report_manifest.json'
+    }
+
+
+# Converts raw dollar values into shorter axis labels that are easier to read on plots
+def money_formatter(x, _pos):
+    if np.isnan(x):
+        return ''
+    if abs(x) >= 1_000_000:
+        return f'${x / 1_000_000:.1f}M'
+    if abs(x) >= 1_000:
+        return f'${x / 1_000:.0f}k'
+    return f'${x:.0f}'
+
+
+# Applies the shared dollar formatter so all money axes read the same way
+def format_money_axis(ax, axis='x'):
+    formatter = FuncFormatter(money_formatter)
+    if axis in {'x', 'both'}:
+        ax.xaxis.set_major_formatter(formatter)
+    if axis in {'y', 'both'}:
+        ax.yaxis.set_major_formatter(formatter)
+
+
+# Builds a scored frame with real-dollar predictions and residuals for diagnostics
+def score_prediction_frame(frame, pred_log, actual_log_col=TARGET_COL):
+    out = frame.copy()
+    out['pred_log'] = pd.Series(pred_log, index=out.index).astype(float)
+    out['actual_log'] = pd.to_numeric(out[actual_log_col], errors='coerce')
+    out['pred_real'] = np.exp(out['pred_log'])
+    out['actual_real'] = np.exp(out['actual_log'])
+    out['signed_error_real'] = out['pred_real'] - out['actual_real']
+    out['abs_error_real'] = out['signed_error_real'].abs()
+    out['pct_error'] = np.where(
+        out['actual_real'].gt(0),
+        out['abs_error_real'] / out['actual_real'] * 100.0,
+        np.nan
+    )
+    return out
+
+
+# Summarizes where the model does well or poorly once the test rows are grouped
+def summarize_prediction_groups(scored_df, group_cols, train_ref=None):
+    rows = []
+
+    for key, sub in scored_df.groupby(group_cols, dropna=False):
+        if not isinstance(key, tuple):
+            key = (key,)
+
+        row = dict(zip(group_cols, key, strict=False))
+        row['test_rows'] = len(sub)
+        row['actual_median_real'] = float(sub['actual_real'].median())
+        row['pred_median_real'] = float(sub['pred_real'].median())
+        row['medae_real'] = float(sub['abs_error_real'].median())
+        row['mae_real'] = float(sub['abs_error_real'].mean())
+        row['rmse_real'] = float(np.sqrt(np.mean(sub['signed_error_real'] ** 2)))
+        row['median_signed_error_real'] = float(sub['signed_error_real'].median())
+        row['median_pct_error'] = float(sub['pct_error'].median())
+        rows.append(row)
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    if train_ref is not None:
+        support = train_ref.groupby(group_cols, dropna=False).size().rename('train_rows').reset_index()
+        out = out.merge(support, on=group_cols, how='left')
+        out['train_rows'] = out['train_rows'].fillna(0).astype(int)
+
+    return out.sort_values('medae_real', ascending=False).reset_index(drop=True)
+
+
+# Uses the same test rows to compare where the winsorized and plain models diverge
+def build_decile_compare_table(selected_scored, plain_scored):
+    out_selected = selected_scored.copy()
+    out_plain = plain_scored.copy()
+
+    labels = [f'D{idx}' for idx in range(1, 11)]
+    decile_dtype = pd.CategoricalDtype(categories=labels, ordered=True)
+    out_selected['actual_decile'] = pd.qcut(
+        out_selected['actual_real'].rank(method='first'),
+        10,
+        labels=labels
+    ).astype(decile_dtype)
+    out_plain['actual_decile'] = pd.Categorical(
+        out_selected['actual_decile'].to_numpy(),
+        categories=labels,
+        ordered=True
+    )
+
+    rows = []
+    for setup_name, scored in [
+        ('LightGBM core + top tech flags', out_plain),
+        ('LightGBM winsorized target + top tech flags', out_selected)
+    ]:
+        grouped = (
+            scored
+            .groupby('actual_decile', observed=False)
+            .agg(
+                rows=('actual_real', 'size'),
+                median_actual_real=('actual_real', 'median'),
+                medae_real=('abs_error_real', 'median'),
+                mae_real=('abs_error_real', 'mean'),
+                median_signed_error_real=('signed_error_real', 'median'),
+                median_pct_error=('pct_error', 'median')
+            )
+            .reset_index()
+        )
+        grouped['actual_decile'] = grouped['actual_decile'].astype(decile_dtype)
+        grouped['setup'] = setup_name
+        rows.append(grouped)
+
+    return (
+        pd.concat(rows, axis=0)
+        .sort_values(['setup', 'actual_decile'])
+        .reset_index(drop=True)
+    )
+
+
+# Maps raw feature names into broader story buckets for presentation-ready importance views
+def feature_family(feature):
+    if feature in {'country_clean', 'region'}:
+        return 'Geography'
+    if feature == 'survey_year_str':
+        return 'Survey year'
+    if feature == 'employment_primary':
+        return 'Employment'
+    if feature == 'education_clean':
+        return 'Education'
+    if feature == 'org_size_clean':
+        return 'Organization size'
+    if feature in {'age_mid', 'professional_experience_years'}:
+        return 'Experience and age'
+    if feature in {'language_count', 'database_count', 'platform_count'}:
+        return 'Tech breadth'
+    if feature.startswith('language_') or feature.startswith('database_') or feature.startswith('platform_'):
+        return 'Top tech flags'
+    if feature.startswith('role_'):
+        return 'Role'
+    return 'Other'
+
+
+# Rolls feature-level importance up into broader families so the hidden structure is easier to see
+def aggregate_feature_family_importance(feature_df, value_col):
+    out = feature_df.copy()
+    out['family'] = out['feature'].map(feature_family)
+    return (
+        out
+        .groupby('family', as_index=False)[value_col]
+        .sum()
+        .sort_values(value_col, ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+# SHAP gives the cleanest feature-driver view for the locked LightGBM model
+def build_selected_shap_bundle(model, feature_frame, sample_size=REPORT_SHAP_SAMPLE):
+    shap_frame = feature_frame.copy()
+    if sample_size is not None and len(shap_frame) > sample_size:
+        shap_frame = shap_frame.sample(sample_size, random_state=RANDOM_STATE)
+
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(shap_frame)
+    if isinstance(shap_values, list):
+        shap_values = shap_values[0]
+
+    display_frame = shap_frame.copy()
+    for col in display_frame.columns:
+        if str(display_frame[col].dtype) == 'category':
+            display_frame[col] = display_frame[col].astype(str)
+
+    top_features = pd.DataFrame({
+        'feature': feature_frame.columns,
+        'mean_abs_shap': np.abs(shap_values).mean(axis=0)
+    }).sort_values('mean_abs_shap', ascending=False).reset_index(drop=True)
+
+    return {
+        'feature_frame': shap_frame,
+        'display_frame': display_frame,
+        'shap_values': shap_values,
+        'top_features': top_features,
+        'family_importance': aggregate_feature_family_importance(top_features, 'mean_abs_shap')
+    }
+
+
+# Pulls together the model, predictions, SHAP, and subgroup summaries needed for reporting
+def build_compensation_report_bundle(
+    clean_core,
+    lgb_params=None,
+    lgb_preset=None,
+    top_n_map=None,
+    shap_sample_size=REPORT_SHAP_SAMPLE,
+    include_shap=True,
+    include_rolling=True
+):
+    comparison = compare_same_sample_setups(
+        clean_core,
+        lgb_params=lgb_params,
+        lgb_preset=lgb_preset,
+        top_n_map=top_n_map
+    )
+    bundle = comparison['bundle']
+    feature_sets = bundle['feature_sets']
+    core_df = bundle['core_df']
+
+    core_train, core_valid, core_test, tech_flag_cols = split_window_with_tech_flags(
+        core_df,
+        CORE_WINDOW_YEARS,
+        VALID_YEAR,
+        TEST_YEAR,
+        top_n_map=top_n_map
+    )
+    train_valid = pd.concat([core_train, core_valid], axis=0)
+
+    selected_result = comparison['selected_main_result']
+    plain_result = comparison['lightgbm_core_top_tech']
+
+    selected_test = add_winsor_targets(core_test, fit_frame=train_valid, group_cols=('country_clean',))
+    selected_test_prepped = transform_lgbm_frame(
+        selected_test,
+        feature_sets['core_cat'],
+        feature_sets['core_num'] + tech_flag_cols,
+        selected_result['num_imputer'],
+        target_col=WINSOR_TARGET_COL
+    )
+    selected_pred_log = selected_result['model'].predict(selected_test_prepped[selected_result['feature_cols']])
+    selected_scored = score_prediction_frame(selected_test, selected_pred_log, actual_log_col=TARGET_COL)
+
+    plain_test_prepped = transform_lgbm_frame(
+        core_test,
+        feature_sets['core_cat'],
+        feature_sets['core_num'] + tech_flag_cols,
+        plain_result['num_imputer'],
+        target_col=TARGET_COL
+    )
+    plain_pred_log = plain_result['model'].predict(plain_test_prepped[plain_result['feature_cols']])
+    plain_scored = score_prediction_frame(core_test, plain_pred_log, actual_log_col=TARGET_COL)
+
+    split_counts = (
+        core_df
+        .assign(
+            split=lambda df: np.where(
+                df['survey_year'].eq(TEST_YEAR),
+                'test',
+                np.where(df['survey_year'].eq(VALID_YEAR), 'valid', 'train')
+            )
+        )
+        .groupby(['survey_year', 'split'], as_index=False)
+        .size()
+        .rename(columns={'size': 'rows'})
+    )
+
+    region_metrics = summarize_prediction_groups(selected_scored, ['region'], train_ref=train_valid)
+    country_metrics = summarize_prediction_groups(selected_scored, ['country_clean', 'region'], train_ref=train_valid)
+    decile_compare = build_decile_compare_table(selected_scored, plain_scored)
+
+    feature_importance = pd.DataFrame({
+        'feature': selected_result['feature_cols'],
+        'importance': selected_result['model'].feature_importances_
+    }).sort_values('importance', ascending=False).reset_index(drop=True)
+
+    shap_bundle = None
+    if include_shap:
+        shap_bundle = build_selected_shap_bundle(
+            selected_result['model'],
+            selected_test_prepped[selected_result['feature_cols']],
+            sample_size=shap_sample_size
+        )
+
+    rolling = None
+    if include_rolling:
+        rolling = rolling_origin_setup_comparison(
+            clean_core,
+            ridge_alphas=[25.0],
+            lgb_presets={SELECTED_LGB_PRESET: LGB_PRESETS[SELECTED_LGB_PRESET]},
+            top_n_map=top_n_map
+        )
+
+    return {
+        'comparison': comparison,
+        'bundle': bundle,
+        'core_train': core_train,
+        'core_valid': core_valid,
+        'core_test': core_test,
+        'train_valid': train_valid,
+        'split_counts': split_counts,
+        'selected_result': selected_result,
+        'plain_result': plain_result,
+        'selected_scored': selected_scored,
+        'plain_scored': plain_scored,
+        'region_metrics': region_metrics,
+        'country_metrics': country_metrics,
+        'decile_compare': decile_compare,
+        'feature_importance': feature_importance,
+        'shap_bundle': shap_bundle,
+        'rolling': rolling
+    }
+
+
+# Context figure that explains the sample window and why the log target was used
+def plot_compensation_context(report_bundle, path):
+    core_df = report_bundle['bundle']['core_df']
+    split_counts = report_bundle['split_counts']
+    comp_real = pd.to_numeric(core_df[REAL_TARGET_COL], errors='coerce')
+    comp_real = comp_real[comp_real.gt(0)]
+    comp_bins = 40
+    if len(comp_real) > 1 and comp_real.min() < comp_real.max():
+        comp_bins = np.logspace(np.log10(comp_real.min()), np.log10(comp_real.max()), 40)
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    sns.barplot(data=split_counts, x='survey_year', y='rows', hue='split', ax=axes[0], palette='Set2')
+    axes[0].set_title('Compensation Sample Rows By Year')
+    axes[0].set_xlabel('Survey year')
+    axes[0].set_ylabel('Rows')
+    axes[0].legend(title='Split')
+
+    sns.histplot(comp_real, bins=comp_bins, ax=axes[1], color='#4C78A8', edgecolor='white', linewidth=0.3)
+    axes[1].set_xscale('log')
+    axes[1].set_title('Cleaned Compensation Distribution')
+    axes[1].set_xlabel('Compensation in 2025 USD')
+    axes[1].set_ylabel('Rows')
+    format_money_axis(axes[1], axis='x')
+
+    sns.histplot(core_df, x=TARGET_COL, bins=40, ax=axes[2], color='#F58518')
+    axes[2].set_title('Log Compensation Distribution')
+    axes[2].set_xlabel('Log compensation in 2025 USD')
+    axes[2].set_ylabel('Rows')
+
+    plt.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+# Main setup figure that shows why the selected model won the comparison
+def plot_setup_comparison(report_bundle, path):
+    summary = report_bundle['comparison']['summary'].copy()
+    summary['is_selected'] = summary['setup'].eq(report_bundle['comparison']['selected_main_setup'])
+    palette = ['#E45756' if flag else '#72B7B2' for flag in summary['is_selected']]
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 7))
+
+    sns.barplot(data=summary, x='valid_medae_real', y='setup', ax=axes[0], palette=palette, orient='h')
+    axes[0].set_title('Validation MedAE By Setup')
+    axes[0].set_xlabel('Validation MedAE in 2025 USD')
+    axes[0].set_ylabel('')
+    format_money_axis(axes[0], axis='x')
+
+    sns.barplot(data=summary, x='test_medae_real', y='setup', ax=axes[1], palette=palette, orient='h')
+    axes[1].set_title('Test MedAE By Setup')
+    axes[1].set_xlabel('Test MedAE in 2025 USD')
+    axes[1].set_ylabel('')
+    format_money_axis(axes[1], axis='x')
+
+    sns.barplot(data=summary, x='test_rmse_real', y='setup', ax=axes[2], palette=palette, orient='h')
+    axes[2].set_title('Test RMSE By Setup')
+    axes[2].set_xlabel('Test RMSE in 2025 USD')
+    axes[2].set_ylabel('')
+    format_money_axis(axes[2], axis='x')
+
+    plt.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+# Shows where the winsorized target helped and where it stayed basically the same
+def plot_winsor_vs_plain_by_decile(report_bundle, path):
+    decile_compare = report_bundle['decile_compare'].sort_values(['setup', 'actual_decile']).copy()
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+
+    sns.lineplot(
+        data=decile_compare,
+        x='actual_decile',
+        y='medae_real',
+        hue='setup',
+        marker='o',
+        ax=axes[0]
+    )
+    axes[0].set_title('Test MedAE By Actual Compensation Decile')
+    axes[0].set_xlabel('Actual compensation decile')
+    axes[0].set_ylabel('Median absolute error in 2025 USD')
+    format_money_axis(axes[0], axis='y')
+
+    sns.lineplot(
+        data=decile_compare,
+        x='actual_decile',
+        y='median_signed_error_real',
+        hue='setup',
+        marker='o',
+        ax=axes[1]
+    )
+    axes[1].axhline(0, color='black', linewidth=1, linestyle='--')
+    axes[1].set_title('Median Signed Error By Actual Compensation Decile')
+    axes[1].set_xlabel('Actual compensation decile')
+    axes[1].set_ylabel('Prediction minus actual in 2025 USD')
+    format_money_axis(axes[1], axis='y')
+
+    handles, labels = axes[1].get_legend_handles_labels()
+    axes[0].legend_.remove()
+    axes[1].legend(handles, labels, title='Setup')
+    plt.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+# Test-set diagnostics that show the main fit and the remaining residual spread
+def plot_test_diagnostics(report_bundle, path):
+    scored = report_bundle['selected_scored']
+    diag_min = min(scored['actual_real'].min(), scored['pred_real'].min())
+    diag_max = max(scored['actual_real'].max(), scored['pred_real'].max())
+    diag_df = scored[['actual_real', 'pred_real']].dropna()
+    if len(diag_df) > REPORT_SCATTER_SAMPLE:
+        diag_df = diag_df.sample(REPORT_SCATTER_SAMPLE, random_state=RANDOM_STATE)
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+    axes[0].scatter(
+        diag_df['actual_real'],
+        diag_df['pred_real'],
+        s=12,
+        alpha=0.18,
+        color='#4C78A8',
+        edgecolors='none',
+        rasterized=len(diag_df) > 2000
+    )
+    axes[0].plot([diag_min, diag_max], [diag_min, diag_max], color='#F58518', linestyle='--', linewidth=1.5)
+    axes[0].set_xscale('log')
+    axes[0].set_yscale('log')
+    axes[0].set_xlim(diag_min * 0.95, diag_max * 1.05)
+    axes[0].set_ylim(diag_min * 0.95, diag_max * 1.05)
+    axes[0].set_title('Actual vs Predicted Compensation on Test 2025')
+    axes[0].set_xlabel('Actual compensation in 2025 USD')
+    axes[0].set_ylabel('Predicted compensation in 2025 USD')
+    format_money_axis(axes[0], axis='both')
+
+    sns.histplot(scored['signed_error_real'], bins=40, ax=axes[1], color='#72B7B2')
+    axes[1].axvline(0, color='black', linewidth=1, linestyle='--')
+    axes[1].set_title('Signed Error Distribution on Test 2025')
+    axes[1].set_xlabel('Prediction minus actual in 2025 USD')
+    axes[1].set_ylabel('Rows')
+    format_money_axis(axes[1], axis='x')
+
+    plt.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+# Geography dominates compensation, so this figure shows where errors are concentrated
+def plot_subgroup_error(report_bundle, path):
+    region_metrics = report_bundle['region_metrics'].sort_values('medae_real', ascending=False)
+    country_metrics = report_bundle['country_metrics'].copy()
+
+    fig, axes = plt.subplots(1, 2, figsize=(17, 6))
+
+    sns.barplot(data=region_metrics, x='medae_real', y='region', ax=axes[0], palette='crest')
+    axes[0].set_title('Region-Level Test MedAE')
+    axes[0].set_xlabel('Median absolute error in 2025 USD')
+    axes[0].set_ylabel('')
+    format_money_axis(axes[0], axis='x')
+
+    sns.scatterplot(
+        data=country_metrics,
+        x='train_rows',
+        y='medae_real',
+        hue='region',
+        size='test_rows',
+        sizes=(40, 250),
+        alpha=0.8,
+        ax=axes[1]
+    )
+    label_df = country_metrics.sort_values('medae_real', ascending=False).head(REPORT_COUNTRY_LABELS)
+    for _, row in label_df.iterrows():
+        axes[1].annotate(
+            row['country_clean'],
+            (row['train_rows'], row['medae_real']),
+            fontsize=8,
+            alpha=0.8
+        )
+    axes[1].set_xscale('log')
+    axes[1].set_title('Country Error vs Training Support')
+    axes[1].set_xlabel('Training rows by country (log scale)')
+    axes[1].set_ylabel('Test MedAE in 2025 USD')
+    format_money_axis(axes[1], axis='y')
+
+    plt.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+# Compares predicted and actual compensation medians across the main geography cuts
+def plot_geography_alignment(report_bundle, path):
+    scored = report_bundle['selected_scored']
+
+    region_view = (
+        scored
+        .groupby('region', as_index=False)
+        .agg(
+            actual_median_real=('actual_real', 'median'),
+            pred_median_real=('pred_real', 'median')
+        )
+    )
+    top_countries = (
+        scored
+        .groupby('country_clean')
+        .size()
+        .sort_values(ascending=False)
+        .head(REPORT_COUNTRY_LABELS)
+        .index
+    )
+    country_view = (
+        scored.loc[scored['country_clean'].isin(top_countries)]
+        .groupby('country_clean', as_index=False)
+        .agg(
+            rows=('actual_real', 'size'),
+            actual_median_real=('actual_real', 'median'),
+            pred_median_real=('pred_real', 'median')
+        )
+        .sort_values('rows', ascending=False)
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 7))
+
+    region_plot = region_view.melt(
+        id_vars='region',
+        value_vars=['actual_median_real', 'pred_median_real'],
+        var_name='series',
+        value_name='comp_real'
+    )
+    sns.barplot(data=region_plot, x='comp_real', y='region', hue='series', ax=axes[0], palette='Set2')
+    axes[0].set_title('Actual vs Predicted Region Median Compensation')
+    axes[0].set_xlabel('Median compensation in 2025 USD')
+    axes[0].set_ylabel('')
+    format_money_axis(axes[0], axis='x')
+
+    country_plot = country_view.melt(
+        id_vars='country_clean',
+        value_vars=['actual_median_real', 'pred_median_real'],
+        var_name='series',
+        value_name='comp_real'
+    )
+    sns.barplot(data=country_plot, x='comp_real', y='country_clean', hue='series', ax=axes[1], palette='Set2')
+    axes[1].set_title('Actual vs Predicted Country Medians on Top Test Countries')
+    axes[1].set_xlabel('Median compensation in 2025 USD')
+    axes[1].set_ylabel('')
+    format_money_axis(axes[1], axis='x')
+
+    plt.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+# SHAP bar chart keeps the top drivers readable for a slide or report page
+def plot_shap_bar(report_bundle, path, max_display=20):
+    shap_bundle = report_bundle['shap_bundle']
+    plt.figure(figsize=(12, 7))
+    shap.summary_plot(
+        shap_bundle['shap_values'],
+        shap_bundle['display_frame'],
+        plot_type='bar',
+        max_display=max_display,
+        show=False
+    )
+    plt.title('SHAP Summary: Top Compensation Drivers')
+    plt.tight_layout()
+    plt.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close()
+
+
+# SHAP beeswarm shows both feature strength and direction for the selected model
+def plot_shap_beeswarm(report_bundle, path, max_display=20):
+    shap_bundle = report_bundle['shap_bundle']
+    plt.figure(figsize=(12, 8))
+    shap.summary_plot(
+        shap_bundle['shap_values'],
+        shap_bundle['display_frame'],
+        max_display=max_display,
+        show=False
+    )
+    plt.title('SHAP Beeswarm: Selected Compensation Model')
+    plt.tight_layout()
+    plt.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close()
+
+
+# Family-level SHAP helps show the broader story hidden behind the many individual tech flags
+def plot_shap_family_importance(report_bundle, path):
+    shap_family = report_bundle['shap_bundle']['family_importance']
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sns.barplot(data=shap_family, x='mean_abs_shap', y='family', ax=ax, palette='mako')
+    ax.set_title('SHAP Importance By Feature Family')
+    ax.set_xlabel('Total mean |SHAP|')
+    ax.set_ylabel('')
+    plt.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+# Rolling-origin figure checks whether the locked model stays competitive as history expands
+def plot_rolling_origin(report_bundle, path):
+    rolling = report_bundle['rolling']
+    fig, axes = plt.subplots(2, 1, figsize=(11, 10), sharex=True)
+
+    for row in rolling['results']:
+        folds = row['folds'].copy()
+        if folds.empty:
+            continue
+        folds = folds.sort_values('valid_year')
+        axes[0].plot(folds['valid_year'], folds['medae_real'], marker='o', label=row['setup'])
+        axes[1].plot(folds['valid_year'], folds['r2_log'], marker='o', label=row['setup'])
+
+    axes[0].set_title('Rolling-Origin Validation MedAE')
+    axes[0].set_ylabel('MedAE in 2025 USD')
+    format_money_axis(axes[0], axis='y')
+
+    axes[1].set_title('Rolling-Origin Validation R2 On Log Compensation')
+    axes[1].set_xlabel('Validation year')
+    axes[1].set_ylabel('R2 on log target')
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    if axes[0].legend_ is not None:
+        axes[0].legend_.remove()
+    fig.legend(handles, labels, title='Setup', loc='lower center', ncol=2, bbox_to_anchor=(0.5, -0.01))
+    plt.tight_layout(rect=[0, 0.05, 1, 1])
+    fig.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+# Writes the tables, figures, and manifest so the report has one reproducible source
+def generate_compensation_report(
+    clean_core,
+    output_dir=REPORT_DIR,
+    shap_sample_size=REPORT_SHAP_SAMPLE
+):
+    plt.switch_backend('Agg')
+    report_bundle = build_compensation_report_bundle(
+        clean_core,
+        shap_sample_size=shap_sample_size,
+        include_shap=True,
+        include_rolling=True
+    )
+    paths = build_report_paths(output_dir)
+
+    report_bundle['comparison']['summary'].to_csv(paths['tables']['setup_summary'], index=False)
+    report_bundle['split_counts'].to_csv(paths['tables']['split_counts'], index=False)
+    report_bundle['region_metrics'].to_csv(paths['tables']['region_metrics'], index=False)
+    report_bundle['country_metrics'].to_csv(paths['tables']['country_metrics'], index=False)
+    report_bundle['decile_compare'].to_csv(paths['tables']['decile_compare'], index=False)
+    report_bundle['feature_importance'].to_csv(paths['tables']['feature_importance'], index=False)
+    report_bundle['shap_bundle']['top_features'].to_csv(paths['tables']['shap_top_features'], index=False)
+    report_bundle['shap_bundle']['family_importance'].to_csv(paths['tables']['shap_family'], index=False)
+
+    plot_compensation_context(report_bundle, paths['figures']['context'])
+    plot_setup_comparison(report_bundle, paths['figures']['setup_compare'])
+    plot_winsor_vs_plain_by_decile(report_bundle, paths['figures']['winsor_vs_plain'])
+    plot_test_diagnostics(report_bundle, paths['figures']['test_diag'])
+    plot_subgroup_error(report_bundle, paths['figures']['subgroup_error'])
+    plot_geography_alignment(report_bundle, paths['figures']['geo_alignment'])
+    plot_shap_bar(report_bundle, paths['figures']['shap_bar'])
+    plot_shap_beeswarm(report_bundle, paths['figures']['shap_beeswarm'])
+    plot_shap_family_importance(report_bundle, paths['figures']['shap_family'])
+    plot_rolling_origin(report_bundle, paths['figures']['rolling_origin'])
+
+    manifest = {
+        'objective': 'Report the locked compensation model with reproducible visuals and tables',
+        'unit_of_analysis': 'respondent-year',
+        'task_type': 'predictive compensation regression',
+        'selected_setup': report_bundle['comparison']['selected_main_setup'],
+        'train_years': CORE_WINDOW_YEARS,
+        'valid_year': VALID_YEAR,
+        'test_year': TEST_YEAR,
+        'rows': {
+            'train': int(len(report_bundle['core_train'])),
+            'valid': int(len(report_bundle['core_valid'])),
+            'test': int(len(report_bundle['core_test']))
+        },
+        'selected_metrics': {
+            'valid_medae_real': float(report_bundle['selected_result']['valid_metrics']['medae_real']),
+            'test_medae_real': float(report_bundle['selected_result']['test_metrics']['medae_real']),
+            'test_rmse_real': float(report_bundle['selected_result']['test_metrics']['rmse_real']),
+            'test_r2_log': float(report_bundle['selected_result']['test_metrics']['r2_log'])
+        },
+        'artifacts': {
+            'figures': {name: str(path) for name, path in paths['figures'].items()},
+            'tables': {name: str(path) for name, path in paths['tables'].items()}
+        },
+        'notes': [
+            'Compensation is modeled in log 2025 USD and scored back in real dollars',
+            'The selected model is the winsorized-target LightGBM with train-fit top tech flags',
+            'Geography remains the dominant source of signal and the largest source of subgroup error differences',
+            'The survey is repeated cross-sectional and not a longitudinal panel'
+        ]
+    }
+    paths['manifest'].write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+
+    return {
+        'report_bundle': report_bundle,
+        'paths': paths,
+        'manifest': manifest
+    }
+
+
+# -------------------------------------------------------------------------------------
 # Main
 # -------------------------------------------------------------------------------------
+
+# CLI args keep the module runnable for either quick summaries or full reporting output
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Run the canonical compensation model workflow'
+    )
+    parser.add_argument('--input-path', default=str(CLEAN_PATH), help='Path to clean_core parquet')
+    parser.add_argument('--report', action='store_true', help='Write the final compensation reporting visuals and tables')
+    parser.add_argument('--output-dir', default=str(REPORT_DIR), help='Directory for compensation reporting artifacts')
+    parser.add_argument('--shap-sample-size', type=int, default=REPORT_SHAP_SAMPLE, help='Max rows used for SHAP reporting plots')
+    return parser.parse_args()
+
 
 # Runs the canonical compensation comparison table directly from the cleaned parquet
 def main():
     from src import comp_clean
 
-    clean_core = comp_clean.load_clean_core(CLEAN_PATH)
+    args = parse_args()
+    clean_core = comp_clean.load_clean_core(Path(args.input_path))
+
+    if args.report:
+        report = generate_compensation_report(
+            clean_core,
+            output_dir=Path(args.output_dir),
+            shap_sample_size=args.shap_sample_size
+        )
+        print(f"Report directory: {report['paths']['output_dir']}")
+        for name, path in report['paths']['figures'].items():
+            print(f'figure[{name}]: {path}')
+        for name, path in report['paths']['tables'].items():
+            print(f'table[{name}]: {path}')
+        print(f"manifest: {report['paths']['manifest']}")
+        return
+
     results = compare_same_sample_setups(clean_core)
 
     print(results['summary'].to_string(index=False))
