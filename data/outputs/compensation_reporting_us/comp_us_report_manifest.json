@@ -18,7 +18,7 @@
     "test": 4372
   },
   "metrics": {
-    "locked_global_main_model": {
+    "global_main_model": {
       "valid_medae_real": 14764.283227124215,
       "test_medae_real": 17830.99701697996,
       "test_rmse_real": 62955.14933621221,
@@ -46,10 +46,11 @@
     }
   },
   "notes": [
-    "The compare figure, summary table, and diagnostic comparisons use the locked global main model on its full contract against the United States-only refit",
-    "The prediction table still keeps global predictions on United States rows for country specific inspection",
+    "The compare figure, summary table, and diagnostic comparisons use the global main model on its full contract against the United States only refit",
+    "The prediction table now writes scored rows for the full global 2025 test set and the United States only 2025 refit set in one long-form export",
+    "The SHAP comparison now contrasts the full global main model against the United States only refit rather than a global-on-United-States slice",
     "The side refit removes country and region because the country is held fixed",
-    "The United States-only refit keeps the same winsorized target LightGBM family and top tech flag logic",
-    "This side report is explanatory and does not replace the locked global compensation model"
+    "The United States only refit keeps the same winsorized target LightGBM family and top tech flag logic",
+    "This side report is explanatory and does not replace the global compensation model"
   ]
 }

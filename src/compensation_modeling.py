@@ -57,8 +57,7 @@ REPORT_COUNTRY_LABELS = 12
 REPORT_SCATTER_SAMPLE = 8000
 REPORT_US_COUNTRY = 'United States'
 REPORT_US_TOP_FEATURES = 12
-GLOBAL_MAIN_VIEW = 'Locked global main model'
-GLOBAL_US_VIEW = 'Global selected on US'
+GLOBAL_MAIN_VIEW = 'Global main model'
 US_REFIT_VIEW = 'United States only refit'
 
 # Geography groups for the plain English median baseline
@@ -1237,6 +1236,23 @@ def score_prediction_frame(frame, pred_log, actual_log_col=TARGET_COL):
     return out
 
 
+# Flattens a scored prediction frame into one shared export schema for report tables
+def build_scored_prediction_export(scored_df, model_view, fit_scope, test_scope, report_country=None):
+    id_cols = [col for col in ['row_id', 'response_id', 'survey_year', 'country_clean', 'region'] if col in scored_df.columns]
+    out = scored_df[id_cols].copy()
+    out['model_view'] = model_view
+    out['fit_scope'] = fit_scope
+    out['test_scope'] = test_scope
+    if report_country is not None and 'country_clean' in out.columns:
+        out['is_report_country'] = out['country_clean'].eq(report_country)
+    out['actual_real'] = scored_df['actual_real'].to_numpy()
+    out['pred_real'] = scored_df['pred_real'].to_numpy()
+    out['signed_error_real'] = scored_df['signed_error_real'].to_numpy()
+    out['abs_error_real'] = scored_df['abs_error_real'].to_numpy()
+    out['pct_error'] = scored_df['pct_error'].to_numpy()
+    return out
+
+
 # Summarizes where the model does well or poorly once the test rows are grouped
 def summarize_prediction_groups(scored_df, group_cols, train_ref=None):
     rows = []
@@ -1559,18 +1575,11 @@ def build_us_compensation_report_bundle(
         tune_trials=0,
         group_cols=('country_clean',)
     )
-    global_valid_scored = score_prediction_frame(
-        global_valid,
-        pd.Series(global_result['valid_pred_log'], index=global_valid.index),
-        actual_log_col=TARGET_COL
-    )
     global_test_scored = score_prediction_frame(
         global_test,
         pd.Series(global_result['test_pred_log'], index=global_test.index),
         actual_log_col=TARGET_COL
     )
-    global_valid_country = global_valid_scored.loc[global_valid_scored['country_clean'].eq(country)].copy()
-    global_test_country = global_test_scored.loc[global_test_scored['country_clean'].eq(country)].copy()
 
     country_train, country_valid, country_test, country_tech_cols = split_window_with_tech_flags(
         country_df,
@@ -1592,19 +1601,11 @@ def build_us_compensation_report_bundle(
         tune_trials=0,
         group_cols=()
     )
-    country_valid_scored = score_prediction_frame(
-        country_valid,
-        pd.Series(country_result['valid_pred_log'], index=country_valid.index),
-        actual_log_col=TARGET_COL
-    )
     country_test_scored = score_prediction_frame(
         country_test,
         pd.Series(country_result['test_pred_log'], index=country_test.index),
         actual_log_col=TARGET_COL
     )
-
-    global_valid_country = global_valid_country.reindex(country_valid.index)
-    global_test_country = global_test_country.reindex(country_test.index)
 
     summary = pd.DataFrame([
         {
@@ -1649,15 +1650,23 @@ def build_us_compensation_report_bundle(
         .rename(columns={'size': 'rows'})
     )
 
-    pred_cols = [col for col in ['row_id', 'response_id', 'survey_year', 'country_clean', 'region'] if col in country_test.columns]
-    predictions = country_test[pred_cols].copy()
-    predictions['actual_real'] = country_test_scored['actual_real'].to_numpy()
-    predictions['global_us_fit_pred_real'] = global_test_country['pred_real'].to_numpy()
-    predictions['global_us_fit_signed_error_real'] = global_test_country['signed_error_real'].to_numpy()
-    predictions['global_us_fit_abs_error_real'] = global_test_country['abs_error_real'].to_numpy()
-    predictions['us_refit_pred_real'] = country_test_scored['pred_real'].to_numpy()
-    predictions['us_refit_signed_error_real'] = country_test_scored['signed_error_real'].to_numpy()
-    predictions['us_refit_abs_error_real'] = country_test_scored['abs_error_real'].to_numpy()
+    country_scope = f"{country.lower().replace(' ', '_')}_test_{TEST_YEAR}"
+    predictions = pd.concat([
+        build_scored_prediction_export(
+            global_test_scored,
+            model_view=GLOBAL_MAIN_VIEW,
+            fit_scope='global',
+            test_scope=f'global_test_{TEST_YEAR}',
+            report_country=country
+        ),
+        build_scored_prediction_export(
+            country_test_scored,
+            model_view=US_REFIT_VIEW,
+            fit_scope='country_only',
+            test_scope=country_scope,
+            report_country=country
+        )
+    ], axis=0).reset_index(drop=True)
 
     decile_compare = build_named_decile_compare_table([
         (GLOBAL_MAIN_VIEW, global_test_scored),
@@ -1690,33 +1699,22 @@ def build_us_compensation_report_bundle(
             target_col=WINSOR_TARGET_COL
         )
 
-        global_country_features = global_test_prepped.loc[
-            global_test_winsor['country_clean'].eq(country),
-            global_result['feature_cols']
-        ].copy()
+        global_feature_frame = global_test_prepped.loc[:, global_result['feature_cols']].copy()
         country_feature_frame = country_test_prepped.loc[:, country_result['feature_cols']].copy()
-        if len(global_country_features) != len(country_feature_frame):
-            raise ValueError("United States SHAP comparison frames must align row for row")
-
-        sample_positions = np.arange(len(country_feature_frame))
-        if shap_sample_size is not None and len(sample_positions) > shap_sample_size:
-            sample_positions = np.sort(
-                np.random.default_rng(RANDOM_STATE).choice(sample_positions, size=shap_sample_size, replace=False)
-            )
 
         global_shap_bundle = build_selected_shap_bundle(
             global_result['model'],
-            global_country_features.iloc[sample_positions],
-            sample_size=None
+            global_feature_frame,
+            sample_size=shap_sample_size
         )
         country_shap_bundle = build_selected_shap_bundle(
             country_result['model'],
-            country_feature_frame.iloc[sample_positions],
-            sample_size=None
+            country_feature_frame,
+            sample_size=shap_sample_size
         )
 
         global_shap_compare = normalize_importance_values(global_shap_bundle['top_features'], value_col='mean_abs_shap')
-        global_shap_compare['model_view'] = GLOBAL_US_VIEW
+        global_shap_compare['model_view'] = GLOBAL_MAIN_VIEW
         country_shap_compare = normalize_importance_values(country_shap_bundle['top_features'], value_col='mean_abs_shap')
         country_shap_compare['model_view'] = US_REFIT_VIEW
         shap_compare = pd.concat([global_shap_compare, country_shap_compare], axis=0).reset_index(drop=True)
@@ -1733,11 +1731,7 @@ def build_us_compensation_report_bundle(
         'split_counts': split_counts,
         'global_result': global_result,
         'country_result': country_result,
-        'global_valid_full_scored': global_valid_scored,
-        'global_test_full_scored': global_test_scored,
-        'global_valid_scored': global_valid_country,
-        'global_test_scored': global_test_country,
-        'country_valid_scored': country_valid_scored,
+        'global_test_scored': global_test_scored,
         'country_test_scored': country_test_scored,
         'predictions': predictions,
         'decile_compare': decile_compare,
@@ -2116,10 +2110,10 @@ def plot_us_compare(report_bundle, path):
     plt.close(fig)
 
 
-# Shows how the United States-only refit behaves on the held out 2025 rows
+# Shows how the United States only refit behaves on the held out 2025 rows
 def plot_us_diagnostics(report_bundle, path):
     country_scored = report_bundle['country_test_scored']
-    global_scored = report_bundle['global_test_full_scored']
+    global_scored = report_bundle['global_test_scored']
     decile_compare = report_bundle['decile_compare'].copy()
     diag_min = min(country_scored['actual_real'].min(), country_scored['pred_real'].min())
     diag_max = max(country_scored['actual_real'].max(), country_scored['pred_real'].max())
@@ -2218,7 +2212,7 @@ def plot_us_feature_shift(report_bundle, path):
         ax=ax,
         palette='viridis'
     )
-    ax.set_title('United States Feature Importance Shift')
+    ax.set_title('Global vs United States Feature Shift')
     ax.set_xlabel('Normalized mean |SHAP| share')
     ax.set_ylabel('')
     plt.tight_layout()
@@ -2226,7 +2220,7 @@ def plot_us_feature_shift(report_bundle, path):
     plt.close(fig)
 
 
-# SHAP beeswarm for the United States-only refit keeps the local driver story visible
+# SHAP beeswarm for the United States only refit keeps the local driver story visible
 def plot_us_shap_beeswarm(report_bundle, path, max_display=20):
     shap_bundle = report_bundle['country_shap_bundle']
     plt.figure(figsize=(12, 8))
@@ -2236,7 +2230,7 @@ def plot_us_shap_beeswarm(report_bundle, path, max_display=20):
         max_display=max_display,
         show=False
     )
-    plt.title('SHAP Beeswarm: United States-only refit')
+    plt.title('SHAP Beeswarm: United States only refit')
     plt.tight_layout()
     plt.savefig(path, dpi=200, bbox_inches='tight')
     plt.close()
@@ -2358,7 +2352,7 @@ def generate_us_compensation_report(
             'test': int(len(report_bundle['country_test']))
         },
         'metrics': {
-            'locked_global_main_model': {
+            'global_main_model': {
                 'valid_medae_real': float(global_row['valid_medae_real']),
                 'test_medae_real': float(global_row['test_medae_real']),
                 'test_rmse_real': float(global_row['test_rmse_real']),
@@ -2376,11 +2370,12 @@ def generate_us_compensation_report(
             'tables': {name: str(path) for name, path in paths['tables'].items()}
         },
         'notes': [
-            'The compare figure, summary table, and diagnostic comparisons use the locked global main model on its full contract against the United States-only refit',
-            'The prediction table still keeps global predictions on United States rows for country specific inspection',
+            'The compare figure, summary table, and diagnostic comparisons use the global main model on its full contract against the United States only refit',
+            'The prediction table now writes scored rows for the full global 2025 test set and the United States only 2025 refit set in one long-form export',
+            'The SHAP comparison now contrasts the full global main model against the United States only refit rather than a global-on-United-States slice',
             'The side refit removes country and region because the country is held fixed',
-            'The United States-only refit keeps the same winsorized target LightGBM family and top tech flag logic',
-            'This side report is explanatory and does not replace the locked global compensation model'
+            'The United States only refit keeps the same winsorized target LightGBM family and top tech flag logic',
+            'This side report is explanatory and does not replace the global compensation model'
         ]
     }
     paths['manifest'].write_text(json.dumps(manifest, indent=2), encoding='utf-8')

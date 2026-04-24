@@ -298,10 +298,20 @@ def test_build_us_report_paths_and_bundle_run_on_synthetic_data():
         include_shap=True
     )
 
-    assert set(report['summary']['model_view']) == {'Locked global main model', 'United States-only refit'}
-    assert len(report['global_test_scored']) == len(report['country_test_scored'])
-    assert len(report['global_test_full_scored']) >= len(report['country_test_scored'])
-    assert len(report['predictions']) == len(report['country_test_scored'])
+    assert set(report['summary']['model_view']) == {
+        compensation_modeling.GLOBAL_MAIN_VIEW,
+        compensation_modeling.US_REFIT_VIEW
+    }
+    assert len(report['global_test_scored']) >= len(report['country_test_scored'])
+    assert len(report['predictions']) == len(report['global_test_scored']) + len(report['country_test_scored'])
+    assert set(report['predictions']['model_view']) == {
+        compensation_modeling.GLOBAL_MAIN_VIEW,
+        compensation_modeling.US_REFIT_VIEW
+    }
+    assert set(report['shap_compare']['model_view']) == {
+        compensation_modeling.GLOBAL_MAIN_VIEW,
+        compensation_modeling.US_REFIT_VIEW
+    }
     assert 'country_clean' not in report['country_result']['feature_cols']
     assert 'region' not in report['country_result']['feature_cols']
     assert report['shap_compare'] is not None
