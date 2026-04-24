@@ -57,6 +57,9 @@ REPORT_COUNTRY_LABELS = 12
 REPORT_SCATTER_SAMPLE = 8000
 REPORT_US_COUNTRY = 'United States'
 REPORT_US_TOP_FEATURES = 12
+GLOBAL_MAIN_VIEW = 'Locked global main model'
+GLOBAL_US_VIEW = 'Global selected on US'
+US_REFIT_VIEW = 'United States only refit'
 
 # Geography groups for the plain English median baseline
 BASELINE_GROUP_SETS = [
@@ -1285,10 +1288,7 @@ def build_named_decile_compare_table(scored_frames, shared_deciles=True):
             ).astype(decile_dtype)
         return out
 
-    if shared_deciles:
-        out_first = assign_deciles(out_first)
-    else:
-        out_first = assign_deciles(out_first)
+    out_first = assign_deciles(out_first)
 
     rows = []
     for setup_name, scored in [(first_setup, out_first)] + list(scored_frames[1:]):
@@ -1606,12 +1606,9 @@ def build_us_compensation_report_bundle(
     global_valid_country = global_valid_country.reindex(country_valid.index)
     global_test_country = global_test_country.reindex(country_test.index)
 
-    country_valid_metrics = model_audit.score_log_comp(country_valid_scored['actual_log'], country_valid_scored['pred_log'])
-    country_test_metrics = model_audit.score_log_comp(country_test_scored['actual_log'], country_test_scored['pred_log'])
-
     summary = pd.DataFrame([
         {
-            'model_view': 'Locked global main model',
+            'model_view': GLOBAL_MAIN_VIEW,
             'fit_scope': 'global',
             'country': 'All countries',
             'train_rows': int(len(global_train)),
@@ -1624,17 +1621,17 @@ def build_us_compensation_report_bundle(
             'test_r2_log': float(global_result['test_metrics']['r2_log'])
         },
         {
-            'model_view': 'United States-only refit',
+            'model_view': US_REFIT_VIEW,
             'fit_scope': 'country_only',
             'country': country,
             'train_rows': int(len(country_train)),
             'valid_rows': int(len(country_valid)),
             'test_rows': int(len(country_test)),
             'feature_count': int(len(country_result['feature_cols'])),
-            'valid_medae_real': float(country_valid_metrics['medae_real']),
-            'test_medae_real': float(country_test_metrics['medae_real']),
-            'test_rmse_real': float(country_test_metrics['rmse_real']),
-            'test_r2_log': float(country_test_metrics['r2_log'])
+            'valid_medae_real': float(country_result['valid_metrics']['medae_real']),
+            'test_medae_real': float(country_result['test_metrics']['medae_real']),
+            'test_rmse_real': float(country_result['test_metrics']['rmse_real']),
+            'test_r2_log': float(country_result['test_metrics']['r2_log'])
         }
     ])
 
@@ -1663,8 +1660,8 @@ def build_us_compensation_report_bundle(
     predictions['us_refit_abs_error_real'] = country_test_scored['abs_error_real'].to_numpy()
 
     decile_compare = build_named_decile_compare_table([
-        ('Locked global main model', global_test_scored),
-        ('United States-only refit', country_test_scored)
+        (GLOBAL_MAIN_VIEW, global_test_scored),
+        (US_REFIT_VIEW, country_test_scored)
     ], shared_deciles=False)
 
     global_shap_bundle = None
@@ -1719,9 +1716,9 @@ def build_us_compensation_report_bundle(
         )
 
         global_shap_compare = normalize_importance_values(global_shap_bundle['top_features'], value_col='mean_abs_shap')
-        global_shap_compare['model_view'] = 'Global selected on US'
+        global_shap_compare['model_view'] = GLOBAL_US_VIEW
         country_shap_compare = normalize_importance_values(country_shap_bundle['top_features'], value_col='mean_abs_shap')
-        country_shap_compare['model_view'] = 'United States-only refit'
+        country_shap_compare['model_view'] = US_REFIT_VIEW
         shap_compare = pd.concat([global_shap_compare, country_shap_compare], axis=0).reset_index(drop=True)
         shap_top_features = country_shap_bundle['top_features'].copy()
 
@@ -2077,53 +2074,20 @@ def plot_rolling_origin(report_bundle, path):
 
 # Compares the two United States model views at the split and metric level
 def plot_us_compare(report_bundle, path):
-    core_df = report_bundle['bundle']['core_df']
-    summary = pd.DataFrame([
-        {
-            'model_view': 'Locked global main model',
-            'valid_medae_real': float(report_bundle['global_result']['valid_metrics']['medae_real']),
-            'test_medae_real': float(report_bundle['global_result']['test_metrics']['medae_real']),
-            'test_rmse_real': float(report_bundle['global_result']['test_metrics']['rmse_real'])
-        },
-        {
-            'model_view': 'United States-only refit',
-            'valid_medae_real': float(report_bundle['country_result']['valid_metrics']['medae_real']),
-            'test_medae_real': float(report_bundle['country_result']['test_metrics']['medae_real']),
-            'test_rmse_real': float(report_bundle['country_result']['test_metrics']['rmse_real'])
-        }
-    ])
-    split_counts = pd.DataFrame([
-        {
-            'model_view': 'Locked global main model',
-            'split': 'train',
-            'rows': int(core_df['survey_year'].isin(CORE_WINDOW_YEARS).sum())
-        },
-        {
-            'model_view': 'Locked global main model',
-            'split': 'valid',
-            'rows': int(core_df['survey_year'].eq(VALID_YEAR).sum())
-        },
-        {
-            'model_view': 'Locked global main model',
-            'split': 'test',
-            'rows': int(core_df['survey_year'].eq(TEST_YEAR).sum())
-        },
-        {
-            'model_view': 'United States-only refit',
-            'split': 'train',
-            'rows': int(len(report_bundle['country_train']))
-        },
-        {
-            'model_view': 'United States-only refit',
-            'split': 'valid',
-            'rows': int(len(report_bundle['country_valid']))
-        },
-        {
-            'model_view': 'United States-only refit',
-            'split': 'test',
-            'rows': int(len(report_bundle['country_test']))
-        }
-    ])
+    summary = report_bundle['summary'].copy()
+    split_counts = (
+        summary[[
+                'model_view',
+                'train_rows',
+                'valid_rows',
+                'test_rows'
+        ]].melt(
+            id_vars='model_view',
+            value_vars=['train_rows', 'valid_rows', 'test_rows'],
+            var_name='split',
+            value_name='rows'
+        ).assign(split=lambda df: df['split'].str.replace('_rows', '', regex=False))
+    )
     fig, axes = plt.subplots(2, 2, figsize=(15, 10))
 
     sns.barplot(data=split_counts, x='split', y='rows', hue='model_view', ax=axes[0, 0], palette='Set2')
@@ -2164,8 +2128,8 @@ def plot_us_diagnostics(report_bundle, path):
         diag_df = diag_df.sample(REPORT_SCATTER_SAMPLE, random_state=RANDOM_STATE)
 
     error_compare = pd.concat([
-        global_scored[['signed_error_real']].assign(model_view='Locked global main model'),
-        country_scored[['signed_error_real']].assign(model_view='United States-only refit')
+        global_scored[['signed_error_real']].assign(model_view=GLOBAL_MAIN_VIEW),
+        country_scored[['signed_error_real']].assign(model_view=US_REFIT_VIEW)
     ]).reset_index(drop=True)
 
     fig, axes = plt.subplots(1, 3, figsize=(21, 6))
@@ -2378,8 +2342,8 @@ def generate_us_compensation_report(
     plot_us_feature_shift(report_bundle, paths['figures']['feature_shift'])
     plot_us_shap_beeswarm(report_bundle, paths['figures']['shap_beeswarm'])
 
-    global_row = report_bundle['summary'].loc[report_bundle['summary']['model_view'].eq('Locked global main model')].iloc[0]
-    country_row = report_bundle['summary'].loc[report_bundle['summary']['model_view'].eq('United States-only refit')].iloc[0]
+    global_row = report_bundle['summary'].loc[report_bundle['summary']['model_view'].eq(GLOBAL_MAIN_VIEW)].iloc[0]
+    country_row = report_bundle['summary'].loc[report_bundle['summary']['model_view'].eq(US_REFIT_VIEW)].iloc[0]
     manifest = {
         'objective': 'Report the locked compensation model with a United States only side analysis',
         'unit_of_analysis': 'respondent-year',
@@ -2446,8 +2410,6 @@ def parse_args():
 
 # Runs the canonical compensation comparison table directly from the cleaned parquet
 def main():
-    from src import comp_clean
-
     args = parse_args()
     clean_core = comp_clean.load_clean_core(Path(args.input_path))
 
