@@ -49,8 +49,8 @@
   },
   "notes": [
     "Compensation is modeled in log 2025 USD and scored back in real dollars",
-    "The selected model is the winsorized-target LightGBM with train-fit top tech flags",
+    "The selected model is the winsorized target LightGBM with train fit top tech flags",
     "Geography remains the dominant source of signal and the largest source of subgroup error differences",
-    "The survey is repeated cross-sectional and not a longitudinal panel"
+    "The survey is repeated cross sectional and not a longitudinal panel"
   ]
 }

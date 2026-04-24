@@ -23,11 +23,12 @@ from src import comp_clean, model_audit
 # Setup
 # -------------------------------------------------------------------------------------
 
-# Shared path to the canonical cleaned respondent-year table
+# Shared path to the canonical cleaned respondent year table
 ROOT = Path(__file__).resolve().parents[1]
 CLEAN_PATH = ROOT / 'data' / 'derived' / 'clean_core.parquet'
 OUTPUT_ROOT = ROOT / 'data' / 'outputs'
 REPORT_DIR = OUTPUT_ROOT / 'compensation_reporting'
+REPORT_US_DIR = OUTPUT_ROOT / 'compensation_reporting_us'
 
 # Core random seed and target columns used throughout the compensation workflow
 RANDOM_STATE = 42
@@ -36,7 +37,7 @@ REAL_TARGET_COL = model_audit.COMP_TARGET_REAL
 REAL_WINSOR_COL = 'comp_real_2025_winsor'
 WINSOR_TARGET_COL = 'log_comp_real_2025_winsor'
 
-# The year windows that define the comparable core, tech-rich, and AI-era runs
+# The year windows that define the comparable core, tech rich, and AI era runs
 CORE_WINDOW_YEARS = [2019, 2020, 2021, 2022, 2023]
 TECH_WINDOW_YEARS = [2021, 2022, 2023]
 AI_WINDOW_YEARS = [2023]
@@ -54,15 +55,17 @@ TOP_N_TECH = {
 REPORT_SHAP_SAMPLE = 2000
 REPORT_COUNTRY_LABELS = 12
 REPORT_SCATTER_SAMPLE = 8000
+REPORT_US_COUNTRY = 'United States'
+REPORT_US_TOP_FEATURES = 12
 
-# Geography groups for the plain-English median baseline
+# Geography groups for the plain English median baseline
 BASELINE_GROUP_SETS = [
     ['country_clean'],
     ['region'],
     []
 ]
 
-# Default and notebook-selected LightGBM presets for the canonical compensation runs
+# Default and notebook selected LightGBM presets for the canonical compensation runs
 DEFAULT_LGB_PARAMS = {
     'objective': 'regression_l1',
     'metric': 'l1',
@@ -168,7 +171,7 @@ def add_survey_year_str(frame):
     return out
 
 
-# Gets the compensation frame into one consistent modeling-friendly shape
+# Gets the compensation frame into one consistent modeling friendly shape
 def coerce_compensation_frame(clean_core):
     frame = add_compensation_derived_fields(clean_core)
     frame = add_survey_year_str(frame)
@@ -185,7 +188,7 @@ def coerce_compensation_frame(clean_core):
     return frame
 
 
-# Carves the cleaned table into the core, tech-rich, and AI-era compensation windows
+# Carves the cleaned table into the core, tech rich, and AI era compensation windows
 def get_comp_frames(clean_core):
     base = coerce_compensation_frame(clean_core)
     base = base.loc[
@@ -211,7 +214,7 @@ def get_role_cols(frame):
     return sorted(col for col in frame.columns if col.startswith('role_') and col != 'role_family')
 
 
-# Defines the core and later-wave feature sets in one auditable place
+# Defines the core and later wave feature sets in one auditable place
 def build_feature_sets(role_cols):
     core_cat = [
         'survey_year_str',
@@ -293,7 +296,7 @@ def tech_flag_name(column, tech):
     return f'{column}_{safe}'
 
 
-# Builds train-fit top-tech flags so we don't leak future token popularity backwards
+# Builds train fit top tech flags so we don't leak future token popularity backwards
 def add_top_tech_flags(frame, top_n_map=None, fit_frame=None):
     top_n_map = TOP_N_TECH if top_n_map is None else top_n_map
     fit_source = frame if fit_frame is None else fit_frame
@@ -322,7 +325,7 @@ def add_top_tech_flags(frame, top_n_map=None, fit_frame=None):
     return out, created
 
 
-# Splits a window and adds the same train-fit tech flags to each split
+# Splits a window and adds the same train fit tech flags to each split
 def split_window_with_tech_flags(frame, train_years, valid_year, test_year, top_n_map=None):
     train_df, valid_df, test_df = model_audit.split_years(frame, train_years, valid_year, test_year)
     train_df, tech_flag_cols = add_top_tech_flags(train_df, top_n_map=top_n_map, fit_frame=train_df)
@@ -331,7 +334,7 @@ def split_window_with_tech_flags(frame, train_years, valid_year, test_year, top_
     return train_df, valid_df, test_df, tech_flag_cols
 
 
-# Creates a train-fit winsorized target for the upper-tail compensation experiments
+# Creates a train fit winsorized target for the upper tail compensation experiments
 def add_winsor_targets(
     frame,
     fit_frame=None,
@@ -387,7 +390,7 @@ def normalize_feature_frame(frame, cat_cols, num_cols):
     return out
 
 
-# Straightforward one-hot plus scale preprocessing for the Ridge baseline
+# Straightforward one hot plus scale preprocessing for the Ridge baseline
 def build_ridge_pipe(cat_cols, num_cols):
     prep = ColumnTransformer([
         (
@@ -413,7 +416,7 @@ def build_ridge_pipe(cat_cols, num_cols):
     ])
 
 
-# Geography median is the plain-English benchmark we expect every real model to beat
+# Geography median is the plain English benchmark we expect every real model to beat
 def score_holdout_baseline(train_df, valid_df, test_df, group_sets=None):
     group_sets = BASELINE_GROUP_SETS if group_sets is None else group_sets
     valid_metrics = model_audit.score_hier_median(train_df, valid_df, group_sets)
@@ -572,7 +575,7 @@ def tune_lightgbm(
     return best_params
 
 
-# Standard single-stage LightGBM regression fit on the year-aware holdout contract
+# Standard single stage LightGBM regression fit on the year aware holdout contract
 def fit_lightgbm_holdout(
     train_df,
     valid_df,
@@ -611,9 +614,10 @@ def fit_lightgbm_holdout(
         callbacks=[lgb.early_stopping(early_stopping_rounds, verbose=False)]
     )
     best_iteration = early_model.best_iteration_ or resolved_params.get('n_estimators', DEFAULT_LGB_PARAMS['n_estimators'])
+    valid_pred = early_model.predict(valid_prepped[features], num_iteration=best_iteration)
     valid_metrics = model_audit.score_log_comp(
         valid_prepped[target_col],
-        early_model.predict(valid_prepped[features], num_iteration=best_iteration)
+        valid_pred
     )
 
     final_params = dict(resolved_params)
@@ -623,9 +627,10 @@ def fit_lightgbm_holdout(
     full_train, full_num_imputer = prepare_lgbm_frame(full_train_raw, cat_cols, num_cols, target_col=target_col)
     full_test = transform_lgbm_frame(test_df, cat_cols, num_cols, full_num_imputer, target_col=target_col)
     final_model.fit(full_train[features], full_train[target_col].to_numpy())
+    test_pred = final_model.predict(full_test[features])
     test_metrics = model_audit.score_log_comp(
         full_test[target_col],
-        final_model.predict(full_test[features])
+        test_pred
     )
 
     return {
@@ -634,11 +639,13 @@ def fit_lightgbm_holdout(
         'valid_metrics': valid_metrics,
         'test_metrics': test_metrics,
         'feature_cols': features,
-        'num_imputer': full_num_imputer
+        'num_imputer': full_num_imputer,
+        'valid_pred_log': valid_pred,
+        'test_pred_log': test_pred
     }
 
 
-# Variant that trains on a train-fit winsorized target while still scoring on real compensation
+# Variant that trains on a train fit winsorized target while still scoring on real compensation
 def fit_lightgbm_winsor_holdout(
     train_df,
     valid_df,
@@ -723,7 +730,9 @@ def fit_lightgbm_winsor_holdout(
         'valid_metrics': valid_metrics,
         'test_metrics': test_metrics,
         'feature_cols': features,
-        'num_imputer': full_num_imputer
+        'num_imputer': full_num_imputer,
+        'valid_pred_log': valid_pred,
+        'test_pred_log': test_pred
     }
 
 
@@ -945,7 +954,7 @@ def fit_selected_compensation_model(
     }
 
 
-# Rolling-origin helper used to check whether a setup holds up as the train window expands
+# Rolling origin helper used to check whether a setup holds up as the train window expands
 def rolling_origin_lightgbm(
     frame,
     cat_cols,
@@ -1016,7 +1025,7 @@ def rolling_origin_lightgbm(
     return pd.DataFrame(rows)
 
 
-# Compares the baseline and LightGBM families under rolling-origin validation
+# Compares the baseline and LightGBM families under rolling origin validation
 def rolling_origin_setup_comparison(
     clean_core,
     ridge_alphas=None,
@@ -1166,6 +1175,28 @@ def build_report_paths(output_dir=REPORT_DIR):
     }
 
 
+# Keeps the United States side report artifacts in their own stable directory
+def build_us_report_paths(output_dir=REPORT_US_DIR):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        'output_dir': output_dir,
+        'figures': {
+            'compare': output_dir / 'comp_us_compare.png',
+            'diagnostics': output_dir / 'comp_us_diagnostics.png',
+            'feature_shift': output_dir / 'comp_us_feature_shift.png',
+            'shap_beeswarm': output_dir / 'comp_us_shap_beeswarm.png'
+        },
+        'tables': {
+            'summary': output_dir / 'comp_us_summary.csv',
+            'test_predictions': output_dir / 'comp_us_test_predictions.csv',
+            'shap_compare': output_dir / 'comp_us_shap_compare.csv',
+            'shap_top_features': output_dir / 'comp_us_shap_top_features.csv'
+        },
+        'manifest': output_dir / 'comp_us_report_manifest.json'
+    }
+
+
 # Converts raw dollar values into shorter axis labels that are easier to read on plots
 def money_formatter(x, _pos):
     if np.isnan(x):
@@ -1186,7 +1217,7 @@ def format_money_axis(ax, axis='x'):
         ax.yaxis.set_major_formatter(formatter)
 
 
-# Builds a scored frame with real-dollar predictions and residuals for diagnostics
+# Builds a scored frame with real dollar predictions and residuals for diagnostics
 def score_prediction_frame(frame, pred_log, actual_log_col=TARGET_COL):
     out = frame.copy()
     out['pred_log'] = pd.Series(pred_log, index=out.index).astype(float)
@@ -1234,31 +1265,46 @@ def summarize_prediction_groups(scored_df, group_cols, train_ref=None):
     return out.sort_values('medae_real', ascending=False).reset_index(drop=True)
 
 
-# Uses the same test rows to compare where the winsorized and plain models diverge
-def build_decile_compare_table(selected_scored, plain_scored):
-    out_selected = selected_scored.copy()
-    out_plain = plain_scored.copy()
-
+# Uses either shared or independent deciles to compare how model views behave by compensation band
+def build_named_decile_compare_table(scored_frames, shared_deciles=True):
     labels = [f'D{idx}' for idx in range(1, 11)]
     decile_dtype = pd.CategoricalDtype(categories=labels, ordered=True)
-    out_selected['actual_decile'] = pd.qcut(
-        out_selected['actual_real'].rank(method='first'),
-        10,
-        labels=labels
-    ).astype(decile_dtype)
-    out_plain['actual_decile'] = pd.Categorical(
-        out_selected['actual_decile'].to_numpy(),
-        categories=labels,
-        ordered=True
-    )
+    first_setup, first_scored = scored_frames[0]
+    out_first = first_scored.copy()
+
+    def assign_deciles(scored):
+        out = scored.copy()
+        bin_count = min(10, len(out))
+        if bin_count < 2:
+            out['actual_decile'] = pd.Categorical(['D1'] * len(out), categories=labels, ordered=True)
+        else:
+            out['actual_decile'] = pd.qcut(
+                out['actual_real'].rank(method='first'),
+                bin_count,
+                labels=labels[:bin_count]
+            ).astype(decile_dtype)
+        return out
+
+    if shared_deciles:
+        out_first = assign_deciles(out_first)
+    else:
+        out_first = assign_deciles(out_first)
 
     rows = []
-    for setup_name, scored in [
-        ('LightGBM core + top tech flags', out_plain),
-        ('LightGBM winsorized target + top tech flags', out_selected)
-    ]:
+    for setup_name, scored in [(first_setup, out_first)] + list(scored_frames[1:]):
+        if setup_name == first_setup:
+            working = out_first.copy()
+        elif shared_deciles:
+            working = scored.copy()
+            working['actual_decile'] = pd.Categorical(
+                out_first['actual_decile'].to_numpy(),
+                categories=labels,
+                ordered=True
+            )
+        else:
+            working = assign_deciles(scored)
         grouped = (
-            scored
+            working
             .groupby('actual_decile', observed=False)
             .agg(
                 rows=('actual_real', 'size'),
@@ -1281,7 +1327,15 @@ def build_decile_compare_table(selected_scored, plain_scored):
     )
 
 
-# Maps raw feature names into broader story buckets for presentation-ready importance views
+# Uses the same test rows to compare where the winsorized and plain models diverge
+def build_decile_compare_table(selected_scored, plain_scored):
+    return build_named_decile_compare_table([
+        ('LightGBM core + top tech flags', plain_scored),
+        ('LightGBM winsorized target + top tech flags', selected_scored)
+    ], shared_deciles=True)
+
+
+# Maps raw feature names into broader story buckets for presentation ready importance views
 def feature_family(feature):
     if feature in {'country_clean', 'region'}:
         return 'Geography'
@@ -1304,7 +1358,7 @@ def feature_family(feature):
     return 'Other'
 
 
-# Rolls feature-level importance up into broader families so the hidden structure is easier to see
+# Rolls feature level importance up into broader families so the hidden structure is easier to see
 def aggregate_feature_family_importance(feature_df, value_col):
     out = feature_df.copy()
     out['family'] = out['feature'].map(feature_family)
@@ -1317,7 +1371,15 @@ def aggregate_feature_family_importance(feature_df, value_col):
     )
 
 
-# SHAP gives the cleanest feature-driver view for the locked LightGBM model
+# Converts raw importance magnitudes into within view shares for comparison plots
+def normalize_importance_values(feature_df, value_col='mean_abs_shap'):
+    out = feature_df.copy()
+    total = out[value_col].sum()
+    out[f'normalized_{value_col}'] = np.where(total > 0, out[value_col] / total, 0.0)
+    return out.sort_values(value_col, ascending=False).reset_index(drop=True)
+
+
+# SHAP gives the cleanest feature driver view for the locked LightGBM model
 def build_selected_shap_bundle(model, feature_frame, sample_size=REPORT_SHAP_SAMPLE):
     shap_frame = feature_frame.copy()
     if sample_size is not None and len(shap_frame) > sample_size:
@@ -1461,6 +1523,234 @@ def build_compensation_report_bundle(
     }
 
 
+# Builds a United States side report that compares the global model view to a US only refit
+def build_us_compensation_report_bundle(
+    clean_core,
+    country=REPORT_US_COUNTRY,
+    lgb_params=None,
+    lgb_preset=None,
+    top_n_map=None,
+    shap_sample_size=REPORT_SHAP_SAMPLE,
+    include_shap=True
+):
+    bundle = build_compensation_bundle(clean_core)
+    feature_sets = bundle['feature_sets']
+    core_df = bundle['core_df']
+    country_df = core_df.loc[core_df['country_clean'].eq(country)].copy()
+
+    if country_df.empty:
+        raise ValueError(f"No comparable compensation rows found for {country}")
+
+    global_train, global_valid, global_test, global_tech_cols = split_window_with_tech_flags(
+        core_df,
+        CORE_WINDOW_YEARS,
+        VALID_YEAR,
+        TEST_YEAR,
+        top_n_map=top_n_map
+    )
+    global_result = fit_lightgbm_winsor_holdout(
+        global_train,
+        global_valid,
+        global_test,
+        feature_sets['core_cat'],
+        feature_sets['core_num'] + global_tech_cols,
+        params=lgb_params,
+        preset=lgb_preset,
+        tune_trials=0,
+        group_cols=('country_clean',)
+    )
+    global_valid_scored = score_prediction_frame(
+        global_valid,
+        pd.Series(global_result['valid_pred_log'], index=global_valid.index),
+        actual_log_col=TARGET_COL
+    )
+    global_test_scored = score_prediction_frame(
+        global_test,
+        pd.Series(global_result['test_pred_log'], index=global_test.index),
+        actual_log_col=TARGET_COL
+    )
+    global_valid_country = global_valid_scored.loc[global_valid_scored['country_clean'].eq(country)].copy()
+    global_test_country = global_test_scored.loc[global_test_scored['country_clean'].eq(country)].copy()
+
+    country_train, country_valid, country_test, country_tech_cols = split_window_with_tech_flags(
+        country_df,
+        CORE_WINDOW_YEARS,
+        VALID_YEAR,
+        TEST_YEAR,
+        top_n_map=top_n_map
+    )
+    country_cat_cols = [col for col in feature_sets['core_cat'] if col not in ['country_clean', 'region']]
+    country_num_cols = feature_sets['core_num'] + country_tech_cols
+    country_result = fit_lightgbm_winsor_holdout(
+        country_train,
+        country_valid,
+        country_test,
+        country_cat_cols,
+        country_num_cols,
+        params=lgb_params,
+        preset=lgb_preset,
+        tune_trials=0,
+        group_cols=()
+    )
+    country_valid_scored = score_prediction_frame(
+        country_valid,
+        pd.Series(country_result['valid_pred_log'], index=country_valid.index),
+        actual_log_col=TARGET_COL
+    )
+    country_test_scored = score_prediction_frame(
+        country_test,
+        pd.Series(country_result['test_pred_log'], index=country_test.index),
+        actual_log_col=TARGET_COL
+    )
+
+    global_valid_country = global_valid_country.reindex(country_valid.index)
+    global_test_country = global_test_country.reindex(country_test.index)
+
+    country_valid_metrics = model_audit.score_log_comp(country_valid_scored['actual_log'], country_valid_scored['pred_log'])
+    country_test_metrics = model_audit.score_log_comp(country_test_scored['actual_log'], country_test_scored['pred_log'])
+
+    summary = pd.DataFrame([
+        {
+            'model_view': 'Locked global main model',
+            'fit_scope': 'global',
+            'country': 'All countries',
+            'train_rows': int(len(global_train)),
+            'valid_rows': int(len(global_valid)),
+            'test_rows': int(len(global_test)),
+            'feature_count': int(len(global_result['feature_cols'])),
+            'valid_medae_real': float(global_result['valid_metrics']['medae_real']),
+            'test_medae_real': float(global_result['test_metrics']['medae_real']),
+            'test_rmse_real': float(global_result['test_metrics']['rmse_real']),
+            'test_r2_log': float(global_result['test_metrics']['r2_log'])
+        },
+        {
+            'model_view': 'United States-only refit',
+            'fit_scope': 'country_only',
+            'country': country,
+            'train_rows': int(len(country_train)),
+            'valid_rows': int(len(country_valid)),
+            'test_rows': int(len(country_test)),
+            'feature_count': int(len(country_result['feature_cols'])),
+            'valid_medae_real': float(country_valid_metrics['medae_real']),
+            'test_medae_real': float(country_test_metrics['medae_real']),
+            'test_rmse_real': float(country_test_metrics['rmse_real']),
+            'test_r2_log': float(country_test_metrics['r2_log'])
+        }
+    ])
+
+    split_counts = (
+        country_df
+        .assign(
+            split=lambda df: np.where(
+                df['survey_year'].eq(TEST_YEAR),
+                'test',
+                np.where(df['survey_year'].eq(VALID_YEAR), 'valid', 'train')
+            )
+        )
+        .groupby(['survey_year', 'split'], as_index=False)
+        .size()
+        .rename(columns={'size': 'rows'})
+    )
+
+    pred_cols = [col for col in ['row_id', 'response_id', 'survey_year', 'country_clean', 'region'] if col in country_test.columns]
+    predictions = country_test[pred_cols].copy()
+    predictions['actual_real'] = country_test_scored['actual_real'].to_numpy()
+    predictions['global_us_fit_pred_real'] = global_test_country['pred_real'].to_numpy()
+    predictions['global_us_fit_signed_error_real'] = global_test_country['signed_error_real'].to_numpy()
+    predictions['global_us_fit_abs_error_real'] = global_test_country['abs_error_real'].to_numpy()
+    predictions['us_refit_pred_real'] = country_test_scored['pred_real'].to_numpy()
+    predictions['us_refit_signed_error_real'] = country_test_scored['signed_error_real'].to_numpy()
+    predictions['us_refit_abs_error_real'] = country_test_scored['abs_error_real'].to_numpy()
+
+    decile_compare = build_named_decile_compare_table([
+        ('Locked global main model', global_test_scored),
+        ('United States-only refit', country_test_scored)
+    ], shared_deciles=False)
+
+    global_shap_bundle = None
+    country_shap_bundle = None
+    shap_compare = None
+    shap_top_features = None
+
+    if include_shap:
+        global_train_valid = pd.concat([global_train, global_valid], axis=0)
+        global_test_winsor = add_winsor_targets(global_test, fit_frame=global_train_valid, group_cols=('country_clean',))
+        global_test_prepped = transform_lgbm_frame(
+            global_test_winsor,
+            feature_sets['core_cat'],
+            feature_sets['core_num'] + global_tech_cols,
+            global_result['num_imputer'],
+            target_col=WINSOR_TARGET_COL
+        )
+
+        country_train_valid = pd.concat([country_train, country_valid], axis=0)
+        country_test_winsor = add_winsor_targets(country_test, fit_frame=country_train_valid, group_cols=())
+        country_test_prepped = transform_lgbm_frame(
+            country_test_winsor,
+            country_cat_cols,
+            country_num_cols,
+            country_result['num_imputer'],
+            target_col=WINSOR_TARGET_COL
+        )
+
+        global_country_features = global_test_prepped.loc[
+            global_test_winsor['country_clean'].eq(country),
+            global_result['feature_cols']
+        ].copy()
+        country_feature_frame = country_test_prepped.loc[:, country_result['feature_cols']].copy()
+        if len(global_country_features) != len(country_feature_frame):
+            raise ValueError("United States SHAP comparison frames must align row for row")
+
+        sample_positions = np.arange(len(country_feature_frame))
+        if shap_sample_size is not None and len(sample_positions) > shap_sample_size:
+            sample_positions = np.sort(
+                np.random.default_rng(RANDOM_STATE).choice(sample_positions, size=shap_sample_size, replace=False)
+            )
+
+        global_shap_bundle = build_selected_shap_bundle(
+            global_result['model'],
+            global_country_features.iloc[sample_positions],
+            sample_size=None
+        )
+        country_shap_bundle = build_selected_shap_bundle(
+            country_result['model'],
+            country_feature_frame.iloc[sample_positions],
+            sample_size=None
+        )
+
+        global_shap_compare = normalize_importance_values(global_shap_bundle['top_features'], value_col='mean_abs_shap')
+        global_shap_compare['model_view'] = 'Global selected on US'
+        country_shap_compare = normalize_importance_values(country_shap_bundle['top_features'], value_col='mean_abs_shap')
+        country_shap_compare['model_view'] = 'United States-only refit'
+        shap_compare = pd.concat([global_shap_compare, country_shap_compare], axis=0).reset_index(drop=True)
+        shap_top_features = country_shap_bundle['top_features'].copy()
+
+    return {
+        'country': country,
+        'bundle': bundle,
+        'country_df': country_df,
+        'country_train': country_train,
+        'country_valid': country_valid,
+        'country_test': country_test,
+        'summary': summary,
+        'split_counts': split_counts,
+        'global_result': global_result,
+        'country_result': country_result,
+        'global_valid_full_scored': global_valid_scored,
+        'global_test_full_scored': global_test_scored,
+        'global_valid_scored': global_valid_country,
+        'global_test_scored': global_test_country,
+        'country_valid_scored': country_valid_scored,
+        'country_test_scored': country_test_scored,
+        'predictions': predictions,
+        'decile_compare': decile_compare,
+        'global_shap_bundle': global_shap_bundle,
+        'country_shap_bundle': country_shap_bundle,
+        'shap_compare': shap_compare,
+        'shap_top_features': shap_top_features
+    }
+
+
 # Context figure that explains the sample window and why the log target was used
 def plot_compensation_context(report_bundle, path):
     core_df = report_bundle['bundle']['core_df']
@@ -1471,7 +1761,7 @@ def plot_compensation_context(report_bundle, path):
     if len(comp_real) > 1 and comp_real.min() < comp_real.max():
         comp_bins = np.logspace(np.log10(comp_real.min()), np.log10(comp_real.max()), 40)
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(18, 5))
 
     sns.barplot(data=split_counts, x='survey_year', y='rows', hue='split', ax=axes[0], palette='Set2')
     axes[0].set_title('Compensation Sample Rows By Year')
@@ -1485,11 +1775,6 @@ def plot_compensation_context(report_bundle, path):
     axes[1].set_xlabel('Compensation in 2025 USD')
     axes[1].set_ylabel('Rows')
     format_money_axis(axes[1], axis='x')
-
-    sns.histplot(core_df, x=TARGET_COL, bins=40, ax=axes[2], color='#F58518')
-    axes[2].set_title('Log Compensation Distribution')
-    axes[2].set_xlabel('Log compensation in 2025 USD')
-    axes[2].set_ylabel('Rows')
 
     plt.tight_layout()
     fig.savefig(path, dpi=200, bbox_inches='tight')
@@ -1568,7 +1853,7 @@ def plot_winsor_vs_plain_by_decile(report_bundle, path):
     plt.close(fig)
 
 
-# Test-set diagnostics that show the main fit and the remaining residual spread
+# Test set diagnostics that show the main fit and the remaining residual spread
 def plot_test_diagnostics(report_bundle, path):
     scored = report_bundle['selected_scored']
     diag_min = min(scored['actual_real'].min(), scored['pred_real'].min())
@@ -1747,7 +2032,7 @@ def plot_shap_beeswarm(report_bundle, path, max_display=20):
     plt.close()
 
 
-# Family-level SHAP helps show the broader story hidden behind the many individual tech flags
+# Family level SHAP helps show the broader story hidden behind the many individual tech flags
 def plot_shap_family_importance(report_bundle, path):
     shap_family = report_bundle['shap_bundle']['family_importance']
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -1760,7 +2045,7 @@ def plot_shap_family_importance(report_bundle, path):
     plt.close(fig)
 
 
-# Rolling-origin figure checks whether the locked model stays competitive as history expands
+# Rolling origin figure checks whether the locked model stays competitive as history expands
 def plot_rolling_origin(report_bundle, path):
     rolling = report_bundle['rolling']
     fig, axes = plt.subplots(2, 1, figsize=(11, 10), sharex=True)
@@ -1773,11 +2058,11 @@ def plot_rolling_origin(report_bundle, path):
         axes[0].plot(folds['valid_year'], folds['medae_real'], marker='o', label=row['setup'])
         axes[1].plot(folds['valid_year'], folds['r2_log'], marker='o', label=row['setup'])
 
-    axes[0].set_title('Rolling-Origin Validation MedAE')
+    axes[0].set_title('Rolling Origin Validation MedAE')
     axes[0].set_ylabel('MedAE in 2025 USD')
     format_money_axis(axes[0], axis='y')
 
-    axes[1].set_title('Rolling-Origin Validation R2 On Log Compensation')
+    axes[1].set_title('Rolling Origin Validation R2 On Log Compensation')
     axes[1].set_xlabel('Validation year')
     axes[1].set_ylabel('R2 on log target')
 
@@ -1788,6 +2073,209 @@ def plot_rolling_origin(report_bundle, path):
     plt.tight_layout(rect=[0, 0.05, 1, 1])
     fig.savefig(path, dpi=200, bbox_inches='tight')
     plt.close(fig)
+
+
+# Compares the two United States model views at the split and metric level
+def plot_us_compare(report_bundle, path):
+    core_df = report_bundle['bundle']['core_df']
+    summary = pd.DataFrame([
+        {
+            'model_view': 'Locked global main model',
+            'valid_medae_real': float(report_bundle['global_result']['valid_metrics']['medae_real']),
+            'test_medae_real': float(report_bundle['global_result']['test_metrics']['medae_real']),
+            'test_rmse_real': float(report_bundle['global_result']['test_metrics']['rmse_real'])
+        },
+        {
+            'model_view': 'United States-only refit',
+            'valid_medae_real': float(report_bundle['country_result']['valid_metrics']['medae_real']),
+            'test_medae_real': float(report_bundle['country_result']['test_metrics']['medae_real']),
+            'test_rmse_real': float(report_bundle['country_result']['test_metrics']['rmse_real'])
+        }
+    ])
+    split_counts = pd.DataFrame([
+        {
+            'model_view': 'Locked global main model',
+            'split': 'train',
+            'rows': int(core_df['survey_year'].isin(CORE_WINDOW_YEARS).sum())
+        },
+        {
+            'model_view': 'Locked global main model',
+            'split': 'valid',
+            'rows': int(core_df['survey_year'].eq(VALID_YEAR).sum())
+        },
+        {
+            'model_view': 'Locked global main model',
+            'split': 'test',
+            'rows': int(core_df['survey_year'].eq(TEST_YEAR).sum())
+        },
+        {
+            'model_view': 'United States-only refit',
+            'split': 'train',
+            'rows': int(len(report_bundle['country_train']))
+        },
+        {
+            'model_view': 'United States-only refit',
+            'split': 'valid',
+            'rows': int(len(report_bundle['country_valid']))
+        },
+        {
+            'model_view': 'United States-only refit',
+            'split': 'test',
+            'rows': int(len(report_bundle['country_test']))
+        }
+    ])
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+
+    sns.barplot(data=split_counts, x='split', y='rows', hue='model_view', ax=axes[0, 0], palette='Set2')
+    axes[0, 0].set_title('Modeled Rows By Split')
+    axes[0, 0].set_xlabel('Split')
+    axes[0, 0].set_ylabel('Rows')
+    axes[0, 0].legend(title='Model view')
+
+    metric_plots = [
+        ('valid_medae_real', 'Validation MedAE', axes[0, 1]),
+        ('test_medae_real', 'Test MedAE', axes[1, 0]),
+        ('test_rmse_real', 'Test RMSE', axes[1, 1])
+    ]
+    for metric_col, title, ax in metric_plots:
+        sns.barplot(data=summary, x=metric_col, y='model_view', ax=ax, color='#72B7B2')
+        ax.set_title(title)
+        ax.set_xlabel('Compensation in 2025 USD')
+        ax.set_ylabel('')
+        format_money_axis(ax, axis='x')
+        for container in ax.containers:
+            labels = [money_formatter(value, None) for value in container.datavalues]
+            ax.bar_label(container, labels=labels, padding=3, fontsize=9)
+
+    plt.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+# Shows how the United States-only refit behaves on the held out 2025 rows
+def plot_us_diagnostics(report_bundle, path):
+    country_scored = report_bundle['country_test_scored']
+    global_scored = report_bundle['global_test_full_scored']
+    decile_compare = report_bundle['decile_compare'].copy()
+    diag_min = min(country_scored['actual_real'].min(), country_scored['pred_real'].min())
+    diag_max = max(country_scored['actual_real'].max(), country_scored['pred_real'].max())
+    diag_df = country_scored[['actual_real', 'pred_real']].dropna()
+    if len(diag_df) > REPORT_SCATTER_SAMPLE:
+        diag_df = diag_df.sample(REPORT_SCATTER_SAMPLE, random_state=RANDOM_STATE)
+
+    error_compare = pd.concat([
+        global_scored[['signed_error_real']].assign(model_view='Locked global main model'),
+        country_scored[['signed_error_real']].assign(model_view='United States-only refit')
+    ]).reset_index(drop=True)
+
+    fig, axes = plt.subplots(1, 3, figsize=(21, 6))
+
+    axes[0].scatter(
+        diag_df['actual_real'],
+        diag_df['pred_real'],
+        s=12,
+        alpha=0.18,
+        color='#4C78A8',
+        edgecolors='none',
+        rasterized=len(diag_df) > 2000
+    )
+    axes[0].plot([diag_min, diag_max], [diag_min, diag_max], color='#F58518', linestyle='--', linewidth=1.5)
+    axes[0].set_xscale('log')
+    axes[0].set_yscale('log')
+    axes[0].set_xlim(diag_min * 0.95, diag_max * 1.05)
+    axes[0].set_ylim(diag_min * 0.95, diag_max * 1.05)
+    axes[0].set_title('United States Refit: Actual vs Predicted')
+    axes[0].set_xlabel('Actual compensation in 2025 USD')
+    axes[0].set_ylabel('Predicted compensation in 2025 USD')
+    format_money_axis(axes[0], axis='both')
+
+    sns.histplot(
+        data=error_compare,
+        x='signed_error_real',
+        hue='model_view',
+        bins=35,
+        element='step',
+        stat='count',
+        common_norm=False,
+        ax=axes[1]
+    )
+    axes[1].axvline(0, color='black', linewidth=1, linestyle='--')
+    axes[1].set_title('Signed Error Comparison')
+    axes[1].set_xlabel('Prediction minus actual in 2025 USD')
+    axes[1].set_ylabel('Rows')
+    format_money_axis(axes[1], axis='x')
+
+    sns.lineplot(
+        data=decile_compare,
+        x='actual_decile',
+        y='medae_real',
+        hue='setup',
+        marker='o',
+        ax=axes[2]
+    )
+    axes[2].set_title('Test MedAE By Compensation Decile')
+    axes[2].set_xlabel('Actual compensation decile')
+    axes[2].set_ylabel('Median absolute error in 2025 USD')
+    format_money_axis(axes[2], axis='y')
+
+    plt.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+# Compares feature importance shares before and after the country is held fixed
+def plot_us_feature_shift(report_bundle, path):
+    shap_compare = report_bundle['shap_compare'].copy()
+    top_features = (
+        shap_compare
+        .groupby('feature')['normalized_mean_abs_shap']
+        .max()
+        .sort_values(ascending=False)
+        .head(REPORT_US_TOP_FEATURES)
+        .index
+    )
+    plot_df = shap_compare.loc[shap_compare['feature'].isin(top_features)].copy()
+    feature_order = (
+        plot_df
+        .groupby('feature')['normalized_mean_abs_shap']
+        .max()
+        .sort_values(ascending=False)
+        .index
+        .tolist()
+    )
+    plot_df['feature'] = pd.Categorical(plot_df['feature'], categories=feature_order, ordered=True)
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    sns.barplot(
+        data=plot_df,
+        x='normalized_mean_abs_shap',
+        y='feature',
+        hue='model_view',
+        ax=ax,
+        palette='viridis'
+    )
+    ax.set_title('United States Feature Importance Shift')
+    ax.set_xlabel('Normalized mean |SHAP| share')
+    ax.set_ylabel('')
+    plt.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+# SHAP beeswarm for the United States-only refit keeps the local driver story visible
+def plot_us_shap_beeswarm(report_bundle, path, max_display=20):
+    shap_bundle = report_bundle['country_shap_bundle']
+    plt.figure(figsize=(12, 8))
+    shap.summary_plot(
+        shap_bundle['shap_values'],
+        shap_bundle['display_frame'],
+        max_display=max_display,
+        show=False
+    )
+    plt.title('SHAP Beeswarm: United States-only refit')
+    plt.tight_layout()
+    plt.savefig(path, dpi=200, bbox_inches='tight')
+    plt.close()
 
 
 # Writes the tables, figures, and manifest so the report has one reproducible source
@@ -1850,9 +2338,85 @@ def generate_compensation_report(
         },
         'notes': [
             'Compensation is modeled in log 2025 USD and scored back in real dollars',
-            'The selected model is the winsorized-target LightGBM with train-fit top tech flags',
+            'The selected model is the winsorized target LightGBM with train fit top tech flags',
             'Geography remains the dominant source of signal and the largest source of subgroup error differences',
-            'The survey is repeated cross-sectional and not a longitudinal panel'
+            'The survey is repeated cross sectional and not a longitudinal panel'
+        ]
+    }
+    paths['manifest'].write_text(json.dumps(manifest, indent=2), encoding='utf-8')
+
+    return {
+        'report_bundle': report_bundle,
+        'paths': paths,
+        'manifest': manifest
+    }
+
+
+# Writes the United States side report artifacts for the locked compensation model
+def generate_us_compensation_report(
+    clean_core,
+    output_dir=REPORT_US_DIR,
+    country=REPORT_US_COUNTRY,
+    shap_sample_size=REPORT_SHAP_SAMPLE
+):
+    plt.switch_backend('Agg')
+    report_bundle = build_us_compensation_report_bundle(
+        clean_core,
+        country=country,
+        shap_sample_size=shap_sample_size,
+        include_shap=True
+    )
+    paths = build_us_report_paths(output_dir)
+
+    report_bundle['summary'].to_csv(paths['tables']['summary'], index=False)
+    report_bundle['predictions'].to_csv(paths['tables']['test_predictions'], index=False)
+    report_bundle['shap_compare'].to_csv(paths['tables']['shap_compare'], index=False)
+    report_bundle['shap_top_features'].to_csv(paths['tables']['shap_top_features'], index=False)
+
+    plot_us_compare(report_bundle, paths['figures']['compare'])
+    plot_us_diagnostics(report_bundle, paths['figures']['diagnostics'])
+    plot_us_feature_shift(report_bundle, paths['figures']['feature_shift'])
+    plot_us_shap_beeswarm(report_bundle, paths['figures']['shap_beeswarm'])
+
+    global_row = report_bundle['summary'].loc[report_bundle['summary']['model_view'].eq('Locked global main model')].iloc[0]
+    country_row = report_bundle['summary'].loc[report_bundle['summary']['model_view'].eq('United States-only refit')].iloc[0]
+    manifest = {
+        'objective': 'Report the locked compensation model with a United States only side analysis',
+        'unit_of_analysis': 'respondent-year',
+        'task_type': 'predictive compensation regression',
+        'country': country,
+        'train_years': CORE_WINDOW_YEARS,
+        'valid_year': VALID_YEAR,
+        'test_year': TEST_YEAR,
+        'rows': {
+            'train': int(len(report_bundle['country_train'])),
+            'valid': int(len(report_bundle['country_valid'])),
+            'test': int(len(report_bundle['country_test']))
+        },
+        'metrics': {
+            'locked_global_main_model': {
+                'valid_medae_real': float(global_row['valid_medae_real']),
+                'test_medae_real': float(global_row['test_medae_real']),
+                'test_rmse_real': float(global_row['test_rmse_real']),
+                'test_r2_log': float(global_row['test_r2_log'])
+            },
+            'us_only_refit': {
+                'valid_medae_real': float(country_row['valid_medae_real']),
+                'test_medae_real': float(country_row['test_medae_real']),
+                'test_rmse_real': float(country_row['test_rmse_real']),
+                'test_r2_log': float(country_row['test_r2_log'])
+            }
+        },
+        'artifacts': {
+            'figures': {name: str(path) for name, path in paths['figures'].items()},
+            'tables': {name: str(path) for name, path in paths['tables'].items()}
+        },
+        'notes': [
+            'The compare figure, summary table, and diagnostic comparisons use the locked global main model on its full contract against the United States-only refit',
+            'The prediction table still keeps global predictions on United States rows for country specific inspection',
+            'The side refit removes country and region because the country is held fixed',
+            'The United States-only refit keeps the same winsorized target LightGBM family and top tech flag logic',
+            'This side report is explanatory and does not replace the locked global compensation model'
         ]
     }
     paths['manifest'].write_text(json.dumps(manifest, indent=2), encoding='utf-8')
@@ -1870,12 +2434,12 @@ def generate_compensation_report(
 
 # CLI args keep the module runnable for either quick summaries or full reporting output
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description='Run the canonical compensation model workflow'
-    )
+    parser = argparse.ArgumentParser(description='Run the canonical compensation model workflow')
     parser.add_argument('--input-path', default=str(CLEAN_PATH), help='Path to clean_core parquet')
-    parser.add_argument('--report', action='store_true', help='Write the final compensation reporting visuals and tables')
-    parser.add_argument('--output-dir', default=str(REPORT_DIR), help='Directory for compensation reporting artifacts')
+    report_group = parser.add_mutually_exclusive_group()
+    report_group.add_argument('--report', action='store_true', help='Write the final compensation reporting visuals and tables')
+    report_group.add_argument('--report-us', action='store_true', help='Write the United States compensation side report artifacts')
+    parser.add_argument('--output-dir', default=None, help='Directory for compensation reporting artifacts')
     parser.add_argument('--shap-sample-size', type=int, default=REPORT_SHAP_SAMPLE, help='Max rows used for SHAP reporting plots')
     return parser.parse_args()
 
@@ -1890,14 +2454,29 @@ def main():
     if args.report:
         report = generate_compensation_report(
             clean_core,
-            output_dir=Path(args.output_dir),
+            output_dir=Path(args.output_dir) if args.output_dir is not None else REPORT_DIR,
             shap_sample_size=args.shap_sample_size
         )
         print(f"Report directory: {report['paths']['output_dir']}")
         for name, path in report['paths']['figures'].items():
-            print(f'figure[{name}]: {path}')
+            print(f"figure[{name}]: {path}")
         for name, path in report['paths']['tables'].items():
-            print(f'table[{name}]: {path}')
+            print(f"table[{name}]: {path}")
+        print(f"manifest: {report['paths']['manifest']}")
+        return
+
+    if args.report_us:
+        report = generate_us_compensation_report(
+            clean_core,
+            output_dir=Path(args.output_dir) if args.output_dir is not None else REPORT_US_DIR,
+            country=REPORT_US_COUNTRY,
+            shap_sample_size=args.shap_sample_size
+        )
+        print(f"US report directory: {report['paths']['output_dir']}")
+        for name, path in report['paths']['figures'].items():
+            print(f"figure[{name}]: {path}")
+        for name, path in report['paths']['tables'].items():
+            print(f"table[{name}]: {path}")
         print(f"manifest: {report['paths']['manifest']}")
         return
 
