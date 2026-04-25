@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -229,6 +230,193 @@ def test_fit_selected_compensation_model_runs_on_synthetic_data():
     assert len(result['tech_flag_cols']) > 0
     assert np.isfinite(result['valid_metrics']['medae_real'])
     assert np.isfinite(result['test_metrics']['medae_real'])
+
+
+def test_score_prediction_frame_and_feature_family_helpers():
+    frame = pd.DataFrame({
+        compensation_modeling.TARGET_COL: np.log([50_000, 80_000]),
+        'region': ['Americas', 'Europe']
+    })
+    scored = compensation_modeling.score_prediction_frame(
+        frame,
+        np.log([55_000, 70_000])
+    )
+
+    assert {'pred_real', 'actual_real', 'signed_error_real', 'abs_error_real', 'pct_error'}.issubset(scored.columns)
+    assert compensation_modeling.feature_family('country_clean') == 'Geography'
+    assert compensation_modeling.feature_family('language_python') == 'Top tech flags'
+    assert compensation_modeling.feature_family('professional_experience_years') == 'Experience and age'
+
+
+def test_build_report_paths_and_report_bundle_run_on_synthetic_data():
+    frame = make_comp_frame()
+    paths = compensation_modeling.build_report_paths(compensation_modeling.OUTPUT_ROOT / 'comp_reporting_test')
+
+    assert paths['output_dir'].exists()
+    assert 'context' in paths['figures']
+    assert 'setup_summary' in paths['tables']
+
+    report = compensation_modeling.build_compensation_report_bundle(
+        frame,
+        lgb_params={
+            'n_estimators': 20,
+            'learning_rate': 0.1,
+            'num_leaves': 7,
+            'min_child_samples': 1
+        },
+        include_shap=False,
+        include_rolling=False
+    )
+
+    assert np.isfinite(report['selected_scored']['abs_error_real']).all()
+    assert not report['region_metrics'].empty
+    assert not report['country_metrics'].empty
+    assert not report['decile_compare'].empty
+    assert report['decile_compare'].groupby('setup')['rows'].sum().gt(0).all()
+    assert report['shap_bundle'] is None
+    assert report['rolling'] is None
+
+
+def test_build_us_report_paths_and_bundle_run_on_synthetic_data():
+    frame = make_comp_frame()
+    paths = compensation_modeling.build_us_report_paths(compensation_modeling.OUTPUT_ROOT / 'comp_us_reporting_test')
+
+    assert paths['output_dir'].exists()
+    assert 'compare' in paths['figures']
+    assert 'summary' in paths['tables']
+
+    report = compensation_modeling.build_us_compensation_report_bundle(
+        frame,
+        country='United States',
+        lgb_params={
+            'n_estimators': 20,
+            'learning_rate': 0.1,
+            'num_leaves': 7,
+            'min_child_samples': 1
+        },
+        shap_sample_size=10,
+        include_shap=True
+    )
+
+    assert set(report['summary']['model_view']) == {
+        compensation_modeling.GLOBAL_MAIN_VIEW,
+        compensation_modeling.US_REFIT_VIEW
+    }
+    assert len(report['global_test_scored']) >= len(report['country_test_scored'])
+    assert len(report['predictions']) == len(report['global_test_scored']) + len(report['country_test_scored'])
+    assert set(report['predictions']['model_view']) == {
+        compensation_modeling.GLOBAL_MAIN_VIEW,
+        compensation_modeling.US_REFIT_VIEW
+    }
+    assert set(report['shap_compare']['model_view']) == {
+        compensation_modeling.GLOBAL_MAIN_VIEW,
+        compensation_modeling.US_REFIT_VIEW
+    }
+    assert 'country_clean' not in report['country_result']['feature_cols']
+    assert 'region' not in report['country_result']['feature_cols']
+    assert report['shap_compare'] is not None
+    assert not report['shap_top_features'].empty
+
+
+def test_report_plot_helpers_write_nonempty_pngs():
+    frame = make_comp_frame()
+    plt.switch_backend('Agg')
+    report = compensation_modeling.build_compensation_report_bundle(
+        frame,
+        lgb_params={
+            'n_estimators': 20,
+            'learning_rate': 0.1,
+            'num_leaves': 7,
+            'min_child_samples': 1
+        },
+        include_shap=False,
+        include_rolling=False
+    )
+    report['rolling'] = {
+        'results': [
+            {
+                'setup': 'Ridge core alpha=25.0',
+                'folds': pd.DataFrame({
+                    'valid_year': [2024, 2025],
+                    'medae_real': [15_000, 16_000],
+                    'r2_log': [0.42, 0.45]
+                })
+            },
+            {
+                'setup': 'LightGBM core + top tech flags [tiny]',
+                'folds': pd.DataFrame({
+                    'valid_year': [2024, 2025],
+                    'medae_real': [14_000, 15_500],
+                    'r2_log': [0.47, 0.5]
+                })
+            }
+        ]
+    }
+
+    plot_dir = compensation_modeling.OUTPUT_ROOT / 'comp_plot_test_artifacts'
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    context_path = plot_dir / 'context.png'
+    diagnostics_path = plot_dir / 'diagnostics.png'
+    rolling_path = plot_dir / 'rolling.png'
+
+    compensation_modeling.plot_compensation_context(report, context_path)
+    compensation_modeling.plot_test_diagnostics(report, diagnostics_path)
+    compensation_modeling.plot_rolling_origin(report, rolling_path)
+
+    assert context_path.exists() and context_path.stat().st_size > 0
+    assert diagnostics_path.exists() and diagnostics_path.stat().st_size > 0
+    assert rolling_path.exists() and rolling_path.stat().st_size > 0
+
+
+def test_us_report_plot_helpers_and_writer_write_nonempty_artifacts():
+    frame = make_comp_frame()
+    plt.switch_backend('Agg')
+    report = compensation_modeling.build_us_compensation_report_bundle(
+        frame,
+        country='United States',
+        lgb_params={
+            'n_estimators': 20,
+            'learning_rate': 0.1,
+            'num_leaves': 7,
+            'min_child_samples': 1
+        },
+        shap_sample_size=10,
+        include_shap=True
+    )
+    plot_dir = compensation_modeling.OUTPUT_ROOT / 'comp_us_plot_test_artifacts'
+    plot_dir.mkdir(parents=True, exist_ok=True)
+    compare_path = plot_dir / 'compare.png'
+    diagnostics_path = plot_dir / 'diagnostics.png'
+    feature_shift_path = plot_dir / 'feature_shift.png'
+    shap_beeswarm_path = plot_dir / 'shap_beeswarm.png'
+
+    compensation_modeling.plot_us_compare(report, compare_path)
+    compensation_modeling.plot_us_diagnostics(report, diagnostics_path)
+    compensation_modeling.plot_us_feature_shift(report, feature_shift_path)
+    compensation_modeling.plot_us_shap_beeswarm(report, shap_beeswarm_path)
+
+    assert compare_path.exists() and compare_path.stat().st_size > 0
+    assert diagnostics_path.exists() and diagnostics_path.stat().st_size > 0
+    assert feature_shift_path.exists() and feature_shift_path.stat().st_size > 0
+    assert shap_beeswarm_path.exists() and shap_beeswarm_path.stat().st_size > 0
+
+    output_dir = compensation_modeling.OUTPUT_ROOT / 'comp_us_report_test_artifacts'
+    written = compensation_modeling.generate_us_compensation_report(
+        frame,
+        output_dir=output_dir,
+        country='United States',
+        shap_sample_size=10
+    )
+
+    assert written['paths']['manifest'].exists()
+    assert written['paths']['tables']['summary'].exists()
+    assert written['paths']['tables']['test_predictions'].exists()
+    assert written['paths']['tables']['shap_compare'].exists()
+    assert written['paths']['tables']['shap_top_features'].exists()
+    assert written['paths']['figures']['compare'].exists()
+    assert written['paths']['figures']['diagnostics'].exists()
+    assert written['paths']['figures']['feature_shift'].exists()
+    assert written['paths']['figures']['shap_beeswarm'].exists()
 
 
 def test_rolling_origin_setup_comparison_runs_on_synthetic_data():

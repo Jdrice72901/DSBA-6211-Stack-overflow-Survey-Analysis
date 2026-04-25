@@ -1,0 +1,54 @@
+{
+  "objective": "Report the locked compensation model with a United States only side analysis",
+  "unit_of_analysis": "respondent-year",
+  "task_type": "predictive compensation regression",
+  "country": "United States",
+  "train_years": [
+    2019,
+    2020,
+    2021,
+    2022,
+    2023
+  ],
+  "valid_year": 2024,
+  "test_year": 2025,
+  "rows": {
+    "train": 46123,
+    "valid": 4232,
+    "test": 4372
+  },
+  "metrics": {
+    "global_main_model": {
+      "valid_medae_real": 14764.283227124215,
+      "test_medae_real": 17830.99701697996,
+      "test_rmse_real": 62955.14933621221,
+      "test_r2_log": 0.566826247610939
+    },
+    "us_only_refit": {
+      "valid_medae_real": 30815.035537243937,
+      "test_medae_real": 34913.765139209616,
+      "test_rmse_real": 93331.35546072217,
+      "test_r2_log": 0.294315043667291
+    }
+  },
+  "artifacts": {
+    "figures": {
+      "compare": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting_us\\comp_us_compare.png",
+      "diagnostics": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting_us\\comp_us_diagnostics.png",
+      "feature_shift": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting_us\\comp_us_feature_shift.png",
+      "shap_beeswarm": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting_us\\comp_us_shap_beeswarm.png"
+    },
+    "tables": {
+      "summary": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting_us\\comp_us_summary.csv",
+      "test_predictions": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting_us\\comp_us_test_predictions.csv",
+      "shap_compare": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting_us\\comp_us_shap_compare.csv",
+      "shap_top_features": "C:\\Users\\davis\\Documents\\VCCode Repos\\Stack-Overflow-Survey-Analysis\\DSBA-6211-Stack-overflow-Survey-Analysis\\data\\outputs\\compensation_reporting_us\\comp_us_shap_top_features.csv"
+    }
+  },
+  "notes": [
+    "The compare figure, summary table, and diagnostic comparisons use the global main model on its full contract against the United States only refit",
+    "The side refit removes country and region because the country is held fixed",
+    "The United States only refit keeps the same winsorized target LightGBM family and top tech flag logic",
+    "This side report is explanatory and does not replace the global compensation model"
+  ]
+}
