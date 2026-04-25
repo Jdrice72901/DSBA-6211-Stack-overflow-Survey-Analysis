@@ -739,7 +739,7 @@ def fit_lightgbm_winsor_holdout(
 
 
 # -------------------------------------------------------------------------------------
-# Canonical workflows
+# Workflows
 # -------------------------------------------------------------------------------------
 
 # Main compensation comparison table used to lock the canonical model choice
@@ -863,28 +863,28 @@ def compare_same_sample_setups(
             'test_r2_log': lgb_core['test_metrics']['r2_log']
         },
         {
-            'setup': 'LightGBM core + top tech flags',
+            'setup': 'LightGBM core + top tech',
             'valid_medae_real': core_lgb_top_tech['valid_metrics']['medae_real'],
             'test_medae_real': core_lgb_top_tech['test_metrics']['medae_real'],
             'test_rmse_real': core_lgb_top_tech['test_metrics']['rmse_real'],
             'test_r2_log': core_lgb_top_tech['test_metrics']['r2_log']
         },
         {
-            'setup': 'LightGBM winsorized target + top tech flags',
+            'setup': 'LightGBM winsorized + top tech',
             'valid_medae_real': core_lgb_winsor['valid_metrics']['medae_real'],
             'test_medae_real': core_lgb_winsor['test_metrics']['medae_real'],
             'test_rmse_real': core_lgb_winsor['test_metrics']['rmse_real'],
             'test_r2_log': core_lgb_winsor['test_metrics']['r2_log']
         },
         {
-            'setup': 'LightGBM tech-rich window',
+            'setup': 'LightGBM tech window',
             'valid_medae_real': tech_lgb['valid_metrics']['medae_real'],
             'test_medae_real': tech_lgb['test_metrics']['medae_real'],
             'test_rmse_real': tech_lgb['test_metrics']['rmse_real'],
             'test_r2_log': tech_lgb['test_metrics']['r2_log']
         },
         {
-            'setup': 'LightGBM AI-era window',
+            'setup': 'LightGBM AI window',
             'valid_medae_real': ai_lgb['valid_metrics']['medae_real'],
             'test_medae_real': ai_lgb['test_metrics']['medae_real'],
             'test_rmse_real': ai_lgb['test_metrics']['rmse_real'],
@@ -907,7 +907,7 @@ def compare_same_sample_setups(
             'tech': tech_tech_cols,
             'ai': ai_tech_cols
         },
-        'selected_main_setup': 'LightGBM winsorized target + top tech flags',
+        'selected_main_setup': 'LightGBM winsorized + top tech',
         'selected_main_result': core_lgb_winsor
     }
 
@@ -944,7 +944,7 @@ def fit_selected_compensation_model(
     )
 
     return {
-        'setup': 'LightGBM winsorized target + top tech flags',
+        'setup': 'LightGBM winsorized + top tech',
         'train_years': CORE_WINDOW_YEARS,
         'valid_year': VALID_YEAR,
         'test_year': TEST_YEAR,
@@ -1101,7 +1101,7 @@ def rolling_origin_setup_comparison(
             device_type=device_type
         )
         rows.append({
-            'setup': f'LightGBM core + top tech flags [{preset_name}]',
+            'setup': f'LightGBM core + top tech [{preset_name}]',
             'folds': top_tech_folds
         })
 
@@ -1119,7 +1119,7 @@ def rolling_origin_setup_comparison(
             device_type=device_type
         )
         rows.append({
-            'setup': f'LightGBM winsorized target + top tech flags [{preset_name}]',
+            'setup': f'LightGBM winsorized + top tech [{preset_name}]',
             'folds': winsor_folds
         })
 
@@ -1346,8 +1346,8 @@ def build_named_decile_compare_table(scored_frames, shared_deciles=True):
 # Uses the same test rows to compare where the winsorized and plain models diverge
 def build_decile_compare_table(selected_scored, plain_scored):
     return build_named_decile_compare_table([
-        ('LightGBM core + top tech flags', plain_scored),
-        ('LightGBM winsorized target + top tech flags', selected_scored)
+        ('LightGBM core + top tech', plain_scored),
+        ('LightGBM winsorized + top tech', selected_scored)
     ], shared_deciles=True)
 
 
@@ -1368,7 +1368,7 @@ def feature_family(feature):
     if feature in {'language_count', 'database_count', 'platform_count'}:
         return 'Tech breadth'
     if feature.startswith('language_') or feature.startswith('database_') or feature.startswith('platform_'):
-        return 'Top tech flags'
+        return 'Top tech'
     if feature.startswith('role_'):
         return 'Role'
     return 'Other'
@@ -2371,8 +2371,6 @@ def generate_us_compensation_report(
         },
         'notes': [
             'The compare figure, summary table, and diagnostic comparisons use the global main model on its full contract against the United States only refit',
-            'The prediction table now writes scored rows for the full global 2025 test set and the United States only 2025 refit set in one long-form export',
-            'The SHAP comparison now contrasts the full global main model against the United States only refit rather than a global-on-United-States slice',
             'The side refit removes country and region because the country is held fixed',
             'The United States only refit keeps the same winsorized target LightGBM family and top tech flag logic',
             'This side report is explanatory and does not replace the global compensation model'

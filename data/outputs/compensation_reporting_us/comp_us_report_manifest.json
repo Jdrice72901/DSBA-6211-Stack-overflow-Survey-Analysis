@@ -47,8 +47,6 @@
   },
   "notes": [
     "The compare figure, summary table, and diagnostic comparisons use the global main model on its full contract against the United States only refit",
-    "The prediction table now writes scored rows for the full global 2025 test set and the United States only 2025 refit set in one long-form export",
-    "The SHAP comparison now contrasts the full global main model against the United States only refit rather than a global-on-United-States slice",
     "The side refit removes country and region because the country is held fixed",
     "The United States only refit keeps the same winsorized target LightGBM family and top tech flag logic",
     "This side report is explanatory and does not replace the global compensation model"

@@ -2,7 +2,7 @@
   "objective": "Report the locked compensation model with reproducible visuals and tables",
   "unit_of_analysis": "respondent-year",
   "task_type": "predictive compensation regression",
-  "selected_setup": "LightGBM winsorized target + top tech flags",
+  "selected_setup": "LightGBM winsorized + top tech",
   "train_years": [
     2019,
     2020,
